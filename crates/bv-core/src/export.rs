@@ -1,0 +1,251 @@
+//! Turn an intermediate recording into a small, shareable file.
+
+use std::{
+    io::{BufWriter, Read, Write},
+    path::{Path, PathBuf},
+    process::{Child, Stdio},
+};
+
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    cursor::CursorTrack,
+    ffmpeg,
+    geometry::Size,
+    render::crop_scale_rgba,
+    zoom::{ZoomConfig, ZoomPlanner},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputFormat {
+    Gif,
+    Mp4,
+    Webm,
+}
+
+impl OutputFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            OutputFormat::Gif => "gif",
+            OutputFormat::Mp4 => "mp4",
+            OutputFormat::Webm => "webm",
+        }
+    }
+
+    /// Guess from a file extension.
+    pub fn from_path(path: &Path) -> Option<Self> {
+        match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+            "gif" => Some(Self::Gif),
+            "mp4" => Some(Self::Mp4),
+            "webm" => Some(Self::Webm),
+            _ => None,
+        }
+    }
+
+    /// Encoder arguments, applied after the (already scaled) input.
+    fn encode_args(self) -> Vec<&'static str> {
+        match self {
+            // One-pass palette: `split` lets palettegen see the whole clip
+            // before paletteuse runs. `diff` modes keep static UI crisp and
+            // the file small.
+            OutputFormat::Gif => vec![
+                "-filter_complex",
+                "[0:v]split[a][b];[a]palettegen=stats_mode=diff[p];\
+                 [b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle",
+                "-loop",
+                "0",
+            ],
+            OutputFormat::Mp4 => vec![
+                "-c:v",
+                "libx264",
+                "-preset",
+                "slow",
+                "-crf",
+                "28",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+            ],
+            OutputFormat::Webm => {
+                vec![
+                    "-c:v",
+                    "libvpx-vp9",
+                    "-crf",
+                    "40",
+                    "-b:v",
+                    "0",
+                    "-row-mt",
+                    "1",
+                ]
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportOptions {
+    pub input: PathBuf,
+    pub output: PathBuf,
+    pub format: OutputFormat,
+    /// Output frame rate. GIFs look fine at 10–15 and stay much smaller.
+    pub fps: u32,
+    /// Output width in pixels (height follows aspect ratio). `None` keeps
+    /// the source width.
+    pub width: Option<u32>,
+    /// Cursor-following zoom; needs `cursor`.
+    pub zoom: Option<ZoomConfig>,
+    pub cursor: Option<CursorTrack>,
+}
+
+impl ExportOptions {
+    pub fn new(
+        input: impl Into<PathBuf>,
+        output: impl Into<PathBuf>,
+        format: OutputFormat,
+    ) -> Self {
+        let fps = if format == OutputFormat::Gif { 15 } else { 30 };
+        Self {
+            input: input.into(),
+            output: output.into(),
+            format,
+            fps,
+            width: Some(1280),
+            zoom: None,
+            cursor: None,
+        }
+    }
+}
+
+pub fn export(opts: &ExportOptions) -> Result<PathBuf> {
+    let info = ffmpeg::probe(&opts.input)?;
+    let out_size = info.size.fit_width(opts.width.unwrap_or(info.size.width));
+
+    match (&opts.zoom, &opts.cursor) {
+        (Some(zoom), Some(track)) if !track.is_empty() => {
+            export_zoomed(opts, *zoom, track, info.size, out_size)?
+        }
+        _ => export_plain(opts, out_size)?,
+    }
+    Ok(opts.output.clone())
+}
+
+/// No zoom: a single ffmpeg invocation does everything.
+fn export_plain(opts: &ExportOptions, out: Size) -> Result<()> {
+    let scale = format!(
+        "fps={},scale={}:{}:flags=lanczos",
+        opts.fps, out.width, out.height
+    );
+    let mut cmd = ffmpeg::ffmpeg();
+    cmd.arg("-y").arg("-i").arg(&opts.input);
+    match opts.format {
+        // GIF already uses -filter_complex; prepend the scale chain to it.
+        OutputFormat::Gif => {
+            let fc = format!(
+                "[0:v]{scale},split[a][b];[a]palettegen=stats_mode=diff[p];\
+                 [b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle"
+            );
+            cmd.args(["-filter_complex", &fc, "-loop", "0"]);
+        }
+        f => {
+            cmd.args(["-vf", &scale]).args(f.encode_args());
+        }
+    }
+    let status = cmd
+        .arg("-an")
+        .arg(&opts.output)
+        .status()
+        .context("running ffmpeg")?;
+    if !status.success() {
+        bail!("ffmpeg export failed ({status})");
+    }
+    Ok(())
+}
+
+/// Zoom: ffmpeg decodes to raw RGBA, we pick a viewport per frame and
+/// crop/scale it, then pipe the result into a second ffmpeg to encode.
+fn export_zoomed(
+    opts: &ExportOptions,
+    zoom: ZoomConfig,
+    track: &CursorTrack,
+    src: Size,
+    out: Size,
+) -> Result<()> {
+    let mut decoder = ffmpeg::ffmpeg()
+        .arg("-i")
+        .arg(&opts.input)
+        .args(["-vf", &format!("fps={}", opts.fps)])
+        .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("starting ffmpeg decoder")?;
+
+    let mut encoder = ffmpeg::ffmpeg()
+        .arg("-y")
+        .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
+        .args(["-s", &format!("{}x{}", out.width, out.height)])
+        .args(["-r", &opts.fps.to_string()])
+        .args(["-i", "-"])
+        .args(opts.format.encode_args())
+        .arg(&opts.output)
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("starting ffmpeg encoder")?;
+
+    let result = pump_frames(&mut decoder, &mut encoder, opts.fps, zoom, track, src, out);
+    // Close the encoder's stdin so it can finish, even on error.
+    drop(encoder.stdin.take());
+    let enc_status = encoder.wait()?;
+    let dec_status = decoder.wait()?;
+    result?;
+    if !dec_status.success() {
+        bail!("ffmpeg decoder failed ({dec_status})");
+    }
+    if !enc_status.success() {
+        bail!("ffmpeg encoder failed ({enc_status})");
+    }
+    Ok(())
+}
+
+fn pump_frames(
+    decoder: &mut Child,
+    encoder: &mut Child,
+    fps: u32,
+    zoom: ZoomConfig,
+    track: &CursorTrack,
+    src: Size,
+    out: Size,
+) -> Result<()> {
+    let mut reader = decoder.stdout.take().context("decoder stdout")?;
+    let mut writer = BufWriter::new(encoder.stdin.take().context("encoder stdin")?);
+    let mut planner = ZoomPlanner::new(zoom, track, src);
+
+    let mut frame = vec![0u8; src.width as usize * src.height as usize * 4];
+    let mut scaled = vec![0u8; out.width as usize * out.height as usize * 4];
+    let mut index: u64 = 0;
+    while read_frame(&mut reader, &mut frame)? {
+        let view = planner.next(index as f64 / fps as f64);
+        crop_scale_rgba(&frame, src, view, &mut scaled, out);
+        writer
+            .write_all(&scaled)
+            .context("writing to ffmpeg encoder")?;
+        index += 1;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+/// Fill `buf` with exactly one frame; `Ok(false)` on clean end of stream.
+fn read_frame(r: &mut impl Read, buf: &mut [u8]) -> Result<bool> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match r.read(&mut buf[filled..])? {
+            0 if filled == 0 => return Ok(false),
+            0 => bail!("truncated frame from decoder"),
+            n => filled += n,
+        }
+    }
+    Ok(true)
+}
