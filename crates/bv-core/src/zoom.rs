@@ -88,11 +88,14 @@ pub struct ZoomPlanner<'a> {
     cfg: ZoomConfig,
     track: &'a CursorTrack,
     bounds: Size,
-    /// Sorted, non-overlapping spans during which the camera is zoomed in.
-    active: Vec<Span>,
+    plan: Plan,
+    /// Next aim in `plan.aims` not yet reached.
+    next_aim: usize,
     /// Where the camera wants to be centred.
     target: (f64, f64),
-    was_active: bool,
+    /// Until the click / rest being aimed at happens, hold the target
+    /// instead of following the cursor (which may still be on its way).
+    hold_until: f64,
     log_zoom: Spring,
     cx: Spring,
     cy: Spring,
@@ -104,7 +107,7 @@ impl<'a> ZoomPlanner<'a> {
         let (cx, cy) = track
             .position_at(0.0)
             .unwrap_or((bounds.width as f64 / 2.0, bounds.height as f64 / 2.0));
-        let active = active_spans(&cfg, track, bounds);
+        let plan = plan(&cfg, track, bounds);
         let start_zoom = if cfg.trigger == ZoomTrigger::Follow {
             cfg.level
         } else {
@@ -114,9 +117,10 @@ impl<'a> ZoomPlanner<'a> {
             cfg,
             track,
             bounds,
-            active,
+            plan,
+            next_aim: 0,
             target: (cx, cy),
-            was_active: false,
+            hold_until: f64::NEG_INFINITY,
             log_zoom: Spring::new(start_zoom.max(1.0).ln()),
             cx: Spring::new(cx),
             cy: Spring::new(cy),
@@ -124,27 +128,31 @@ impl<'a> ZoomPlanner<'a> {
         }
     }
 
-    fn span_at(&self, t: f64) -> Option<&Span> {
-        let i = self.active.partition_point(|s| s.end < t);
-        self.active.get(i).filter(|s| s.start <= t)
+    fn zoomed_at(&self, t: f64) -> bool {
+        let spans = &self.plan.spans;
+        let i = spans.partition_point(|s| s.1 < t);
+        spans.get(i).is_some_and(|s| s.0 <= t)
     }
 
     /// Viewport for the frame at time `t` (seconds). `t` must not decrease.
     pub fn next(&mut self, t: f64) -> Rect {
         let cursor = self.track.position_at(t).unwrap_or(self.target);
-        let span = self.span_at(t).copied();
-        let active = span.is_some();
+        let active = self.zoomed_at(t);
         let level = if active { self.cfg.level.max(1.0) } else { 1.0 };
 
-        match span {
-            // Zooming in: aim at what's about to be clicked / looked at,
-            // even though the cursor may still be on its way there.
-            Some(s) if !self.was_active => self.target = s.focus.unwrap_or(cursor),
-            Some(s) if t < s.event => {}
-            Some(_) => self.target = follow(self.target, cursor, self.bounds, level),
-            None => {}
+        // Each click / rest re-aims the camera when its lead time arrives,
+        // even if it's already zoomed in from an earlier one.
+        while let Some(aim) = self.plan.aims.get(self.next_aim) {
+            if aim.from > t {
+                break;
+            }
+            self.target = aim.point;
+            self.hold_until = aim.event;
+            self.next_aim += 1;
         }
-        self.was_active = active;
+        if active && t >= self.hold_until {
+            self.target = follow(self.target, cursor, self.bounds, level);
+        }
 
         let dt = self.last_t.map_or(0.0, |last| (t - last).max(0.0));
         self.last_t = Some(t);
@@ -179,67 +187,75 @@ fn follow(target: (f64, f64), cursor: (f64, f64), bounds: Size, level: f64) -> (
     )
 }
 
-/// A stretch of time the camera is zoomed in.
+/// A click or rest the camera should turn to.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Span {
-    start: f64,
-    end: f64,
-    /// When the click / rest happens (after `start`, which leads it).
+struct Aim {
+    /// When to start turning (a little before `event`).
+    from: f64,
+    /// When the click / rest happens.
     event: f64,
-    /// Where to aim: the click or the resting point.
-    focus: Option<(f64, f64)>,
+    point: (f64, f64),
 }
 
-/// When the camera should be zoomed in, merged and sorted. Spans start a
-/// little early (export knows the future), so the zoom is already under
-/// way when the click or pause happens.
-fn active_spans(cfg: &ZoomConfig, track: &CursorTrack, bounds: Size) -> Vec<Span> {
+#[derive(Debug, Clone, PartialEq, Default)]
+struct Plan {
+    /// Sorted, non-overlapping `(start, end)` times the camera is zoomed in.
+    spans: Vec<(f64, f64)>,
+    /// Sorted by `from`.
+    aims: Vec<Aim>,
+}
+
+/// When the camera is zoomed in and where it aims. Zooms start a little
+/// early (export knows the future), so they're under way when the click
+/// or pause happens; zooms close together merge into one span, but each
+/// keeps its own aim.
+fn plan(cfg: &ZoomConfig, track: &CursorTrack, bounds: Size) -> Plan {
     let lead = cfg.smoothing_secs * 0.5;
     let (click, hover) = match cfg.trigger {
         ZoomTrigger::Follow => {
-            return vec![Span {
-                start: f64::NEG_INFINITY,
-                end: f64::INFINITY,
-                event: f64::NEG_INFINITY,
-                focus: None,
-            }]
+            return Plan {
+                spans: vec![(f64::NEG_INFINITY, f64::INFINITY)],
+                aims: Vec::new(),
+            }
         }
         ZoomTrigger::Click => (true, false),
         ZoomTrigger::Hover => (false, true),
         ZoomTrigger::ClickOrHover => (true, true),
     };
-    let span = |event: f64, end: f64| Span {
-        start: event - lead,
-        end: end + cfg.hold_secs,
-        event,
-        focus: track.position_at(event),
-    };
-    let mut spans: Vec<Span> = Vec::new();
+    // (event, end of the thing that triggered it)
+    let mut events: Vec<(f64, f64)> = Vec::new();
     if click {
-        spans.extend(track.clicks().map(|c| span(c, c)));
+        events.extend(track.clicks().map(|c| (c, c)));
     }
     if hover {
         // Resting = staying within a small radius, relative to the screen.
         let radius = (bounds.width.max(bounds.height) as f64 / 100.0).max(8.0);
-        spans.extend(
-            rests(track, radius, cfg.dwell_secs)
-                .into_iter()
-                .map(|(s, e)| span(s, e)),
-        );
+        events.extend(rests(track, radius, cfg.dwell_secs));
     }
-    spans.sort_by(|a, b| a.start.total_cmp(&b.start));
-    let mut merged: Vec<Span> = Vec::new();
-    for s in spans {
-        match merged.last_mut() {
-            Some(last) if s.start <= last.end + MERGE_GAP_SECS => last.end = last.end.max(s.end),
-            _ => merged.push(s),
+    events.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let mut plan = Plan::default();
+    for &(event, end) in &events {
+        let span = (event - lead, end + cfg.hold_secs);
+        match plan.spans.last_mut() {
+            Some(last) if span.0 <= last.1 + MERGE_GAP_SECS => last.1 = last.1.max(span.1),
+            _ => plan.spans.push(span),
+        }
+        if let Some(point) = track.position_at(event) {
+            plan.aims.push(Aim {
+                from: event - lead,
+                event,
+                point,
+            });
         }
     }
-    merged
+    plan
 }
 
 /// Spans of at least `min_secs` during which the cursor stays within
-/// `radius` of where the span started.
+/// `radius` of where the span started. A rest from the very first sample
+/// is skipped: that's just where the mouse was when recording began, not
+/// something the user moved to.
 fn rests(track: &CursorTrack, radius: f64, min_secs: f64) -> Vec<(f64, f64)> {
     let s = &track.samples;
     let mut out = Vec::new();
@@ -249,7 +265,7 @@ fn rests(track: &CursorTrack, radius: f64, min_secs: f64) -> Vec<(f64, f64)> {
         while j + 1 < s.len() && (s[j + 1].x - s[i].x).hypot(s[j + 1].y - s[i].y) <= radius {
             j += 1;
         }
-        if s[j].t - s[i].t >= min_secs {
+        if i > 0 && s[j].t - s[i].t >= min_secs {
             out.push((s[i].t, s[j].t));
         }
         i = j + 1;
@@ -415,7 +431,48 @@ mod tests {
             (3.0, 0.0, 0.0, true),
             (3.1, 0.0, 0.0, false),
         ]);
-        let spans = active_spans(&ZoomConfig::default(), &tr, Size::new(1000, 600));
-        assert_eq!(spans.len(), 1, "{spans:?}");
+        let p = plan(&ZoomConfig::default(), &tr, Size::new(1000, 600));
+        assert_eq!(p.spans.len(), 1, "{p:?}");
+        assert_eq!(p.aims.len(), 2, "each click still aims: {p:?}");
+    }
+
+    #[test]
+    fn resting_where_recording_began_is_not_hover() {
+        // The cursor sits still for 2 s at the start, then moves away.
+        let tr = track(&[
+            (0.0, 900.0, 500.0, false),
+            (2.0, 900.0, 500.0, false),
+            (2.5, 100.0, 100.0, false),
+            (2.6, 400.0, 300.0, false),
+        ]);
+        let cfg = ZoomConfig {
+            trigger: ZoomTrigger::Hover,
+            ..Default::default()
+        };
+        assert!(plan(&cfg, &tr, Size::new(1000, 600)).spans.is_empty());
+    }
+
+    #[test]
+    fn a_second_click_while_zoomed_re_aims() {
+        // Click top-left, then (still zoomed) bottom-right.
+        let tr = track(&[
+            (0.0, 150.0, 100.0, false),
+            (1.0, 150.0, 100.0, true),
+            (1.1, 150.0, 100.0, false),
+            (1.8, 850.0, 500.0, false),
+            (2.0, 850.0, 500.0, true),
+            (2.1, 850.0, 500.0, false),
+            (6.0, 850.0, 500.0, false),
+        ]);
+        let bounds = Size::new(1000, 600);
+        let mut p = ZoomPlanner::new(ZoomConfig::default(), &tr, bounds);
+        let first = run(&mut p, 1.3);
+        assert!(first.x < 60.0, "on the first click: {first:?}");
+        let mut p = ZoomPlanner::new(ZoomConfig::default(), &tr, bounds);
+        let second = run(&mut p, 3.2);
+        assert!(
+            second.x + second.width > 900.0,
+            "moved to the second: {second:?}"
+        );
     }
 }
