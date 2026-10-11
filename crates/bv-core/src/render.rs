@@ -1,16 +1,30 @@
 //! Per-frame crop + scale of raw RGBA frames.
+//!
+//! Every function takes the range of destination rows to produce, so when
+//! only part of a recording changed (a line of typing, a blinking caret)
+//! just those rows are redrawn.
+
+use std::ops::Range;
 
 use crate::geometry::{Rect, Size};
 
-/// Sample `view` (a sub-rect of `src`) into `dst`, scaling with bilinear
-/// filtering. Both buffers are tightly packed RGBA8.
+/// Sample `view` (a sub-rect of `src`) into rows `rows` of `dst`, scaling
+/// with bilinear filtering. Both buffers are tightly packed RGBA8.
 ///
 /// Crop and scale happen in one pass so no intermediate frame is allocated.
-pub fn crop_scale_rgba(src: &[u8], src_size: Size, view: Rect, dst: &mut [u8], dst_size: Size) {
+pub fn crop_scale_rgba(
+    src: &[u8],
+    src_size: Size,
+    view: Rect,
+    dst: &mut [u8],
+    dst_size: Size,
+    rows: Range<usize>,
+) {
     let (sw, sh) = (src_size.width as usize, src_size.height as usize);
     let (dw, dh) = (dst_size.width as usize, dst_size.height as usize);
     assert_eq!(src.len(), sw * sh * 4, "src buffer size mismatch");
     assert_eq!(dst.len(), dw * dh * 4, "dst buffer size mismatch");
+    let rows = rows.start.min(dh)..rows.end.min(dh);
 
     let sx = view.width / dw as f64;
     let sy = view.height / dh as f64;
@@ -27,7 +41,12 @@ pub fn crop_scale_rgba(src: &[u8], src_size: Size, view: Rect, dst: &mut [u8], d
         })
         .collect();
 
-    for (y, row) in dst.chunks_exact_mut(dw * 4).enumerate() {
+    for (y, row) in dst
+        .chunks_exact_mut(dw * 4)
+        .enumerate()
+        .skip(rows.start)
+        .take(rows.len())
+    {
         let fy = (view.y + (y as f64 + 0.5) * sy - 0.5).clamp(0.0, max_y);
         let y0 = fy as usize;
         let y1 = (y0 + 1).min(sh - 1);
@@ -54,32 +73,51 @@ pub fn crop_scale_rgba_smooth(
     view: Rect,
     dst: &mut [u8],
     dst_size: Size,
+    rows: Range<usize>,
     scratch: &mut Vec<u8>,
 ) {
+    let dh = dst_size.height as usize;
+    let rows = rows.start.min(dh)..rows.end.min(dh);
     let k = ((view.width / dst_size.width as f64).floor() as u32).clamp(1, 4);
     if k == 1 {
         if view == Rect::full(src_size) && dst_size == src_size {
-            return dst.copy_from_slice(src);
+            let stride = src_size.width as usize * 4;
+            let bytes = rows.start * stride..rows.end * stride;
+            return dst[bytes.clone()].copy_from_slice(&src[bytes]);
         }
-        return crop_scale_rgba(src, src_size, view, dst, dst_size);
+        return crop_scale_rgba(src, src_size, view, dst, dst_size, rows);
     }
     let big = Size::new(dst_size.width * k, dst_size.height * k);
+    let k = k as usize;
     // Whole frame at an exact integer ratio (1920→960, 1920→640): the
     // bilinear pass would be an identity copy, so average straight away.
     if view == Rect::full(src_size) && big == src_size {
-        return box_reduce(src, src_size, k as usize, dst, dst_size);
+        return box_reduce(src, src_size, k, dst, dst_size, rows);
     }
     scratch.resize(big.width as usize * big.height as usize * 4, 0);
-    crop_scale_rgba(src, src_size, view, scratch, big);
-    box_reduce(scratch, big, k as usize, dst, dst_size);
+    let big_rows = rows.start * k..rows.end * k;
+    crop_scale_rgba(src, src_size, view, scratch, big, big_rows);
+    box_reduce(scratch, big, k, dst, dst_size, rows);
 }
 
-/// Average each `k×k` block of `src` into one pixel of `dst`.
-fn box_reduce(src: &[u8], src_size: Size, k: usize, dst: &mut [u8], dst_size: Size) {
+/// Average each `k×k` block of `src` into one pixel of rows `rows` of `dst`.
+fn box_reduce(
+    src: &[u8],
+    src_size: Size,
+    k: usize,
+    dst: &mut [u8],
+    dst_size: Size,
+    rows: Range<usize>,
+) {
     let (sw, dw) = (src_size.width as usize, dst_size.width as usize);
     let area = (k * k) as u32;
     let mut sums = vec![0u32; dw * 4];
-    for (y, row) in dst.chunks_exact_mut(dw * 4).enumerate() {
+    for (y, row) in dst
+        .chunks_exact_mut(dw * 4)
+        .enumerate()
+        .skip(rows.start)
+        .take(rows.len())
+    {
         sums.fill(0);
         for sy in y * k..(y + 1) * k {
             let line = &src[sy * sw * 4..(sy + 1) * sw * 4];
@@ -97,8 +135,24 @@ fn box_reduce(src: &[u8], src_size: Size, k: usize, dst: &mut [u8], dst_size: Si
     }
 }
 
+/// Destination rows that can depend on source rows `src_rows` when `view`
+/// is scaled to `dst_size` (with a margin for the filter taps).
+pub fn affected_rows(src_rows: Range<u32>, view: Rect, dst_size: Size) -> Range<usize> {
+    let scale = dst_size.height as f64 / view.height;
+    let lo = ((src_rows.start as f64 - view.y) * scale).floor() as i64 - 2;
+    let hi = ((src_rows.end as f64 - view.y) * scale).ceil() as i64 + 2;
+    let clamp = |v: i64| v.clamp(0, dst_size.height as i64) as usize;
+    clamp(lo)..clamp(hi)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn all(size: Size) -> Range<usize> {
+        0..size.height as usize
+    }
+
     #[test]
     fn smooth_downscale_averages() {
         // 4x2 checkerboard of black/white columns shrinks to mid grey.
@@ -112,28 +166,20 @@ mod tests {
         let out = Size::new(2, 1);
         let mut dst = vec![0; 8];
         let mut scratch = Vec::new();
-        crop_scale_rgba_smooth(
-            &src,
-            src_size,
-            Rect::full(src_size),
-            &mut dst,
-            out,
-            &mut scratch,
-        );
+        let view = Rect::full(src_size);
+        crop_scale_rgba_smooth(&src, src_size, view, &mut dst, out, all(out), &mut scratch);
         for px in dst.chunks(4) {
             assert!((px[0] as i32 - 128).abs() <= 1, "{dst:?}");
             assert_eq!(px[3], 255);
         }
     }
 
-    use super::*;
-
     #[test]
     fn identity_copy() {
         let size = Size::new(3, 2);
         let src: Vec<u8> = (0..24).collect();
         let mut dst = vec![0; 24];
-        crop_scale_rgba(&src, size, Rect::full(size), &mut dst, size);
+        crop_scale_rgba(&src, size, Rect::full(size), &mut dst, size, all(size));
         assert_eq!(src, dst);
     }
 
@@ -156,7 +202,44 @@ mod tests {
             width: 2.0,
             height: 2.0,
         };
-        crop_scale_rgba(&src, size, view, &mut dst, out);
+        crop_scale_rgba(&src, size, view, &mut dst, out, all(out));
         assert!(dst.chunks(4).all(|p| p == [200, 200, 200, 255]), "{dst:?}");
+    }
+
+    #[test]
+    fn redrawing_affected_rows_matches_a_full_render() {
+        // Change a band of source rows and redraw only the affected output
+        // rows; the result must equal rendering everything again. Covers
+        // the exact-ratio box path, the bilinear+box path and plain bilinear.
+        let src_size = Size::new(96, 60);
+        let views = [
+            (Rect::full(src_size), Size::new(32, 20)),
+            (Rect::zoomed(src_size, 2.0, 50.0, 30.0), Size::new(20, 12)),
+            (Rect::zoomed(src_size, 1.7, 40.0, 25.0), Size::new(80, 50)),
+        ];
+        for (view, out) in views {
+            let mut src: Vec<u8> = (0..96 * 60 * 4).map(|i| (i * 7 % 251) as u8).collect();
+            let mut scratch = Vec::new();
+            let mut partial = vec![0u8; (out.width * out.height * 4) as usize];
+            crop_scale_rgba_smooth(
+                &src,
+                src_size,
+                view,
+                &mut partial,
+                out,
+                all(out),
+                &mut scratch,
+            );
+            for y in 30..34 {
+                for x in 0..96 {
+                    src[(y * 96 + x) * 4] ^= 0xFF;
+                }
+            }
+            let rows = affected_rows(30..34, view, out);
+            crop_scale_rgba_smooth(&src, src_size, view, &mut partial, out, rows, &mut scratch);
+            let mut full = vec![0u8; partial.len()];
+            crop_scale_rgba_smooth(&src, src_size, view, &mut full, out, all(out), &mut scratch);
+            assert_eq!(partial, full, "{view:?} -> {out:?}");
+        }
     }
 }

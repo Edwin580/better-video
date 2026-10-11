@@ -139,6 +139,8 @@ pub struct Recorded {
     /// (ffmpeg startup latency). Subtract it from cursor timestamps taken
     /// relative to `started` to line them up with the video. 0 if unknown.
     pub first_frame_delay: f64,
+    /// Capture statistics from the native engine.
+    pub stats: Option<bv_engine::RecorderStats>,
 }
 
 impl Recording {
@@ -202,13 +204,17 @@ impl Recording {
 
     /// Finish writing the recording and wait for it.
     pub fn stop(self) -> Result<Recorded> {
-        let first_frame_delay = match self.backend {
-            Backend::Native(rec) => rec.stop().context("screen capture failed")?.first_frame,
-            Backend::Ffmpeg(child) => stop_ffmpeg(child, &self.output, self.started_wall)?,
+        let (first_frame_delay, stats) = match self.backend {
+            Backend::Native(rec) => {
+                let stats = rec.stop().context("screen capture failed")?;
+                (stats.first_frame, Some(stats))
+            }
+            Backend::Ffmpeg(child) => (stop_ffmpeg(child, &self.output, self.started_wall)?, None),
         };
         Ok(Recorded {
             path: self.output,
             first_frame_delay,
+            stats,
         })
     }
 }

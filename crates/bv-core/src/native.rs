@@ -4,6 +4,7 @@
 use std::{
     fs::File,
     io::{BufWriter, Write},
+    ops::Range,
 };
 
 use anyhow::{bail, Context, Result};
@@ -14,7 +15,7 @@ use crate::{
     export::{spawn_encoder, trimmed_length, ExportOptions, OutputFormat},
     geometry::{Rect, Size},
     overlay::ClickRings,
-    render::crop_scale_rgba_smooth,
+    render::{affected_rows, crop_scale_rgba_smooth},
     zoom::ZoomPlanner,
 };
 
@@ -57,15 +58,17 @@ struct Job<'a> {
 
 impl Job<'_> {
     /// Two passes over the clip: the first collects colours for the
-    /// palette, the second maps and encodes.
+    /// palette, the second maps and encodes. Both only look at the rows
+    /// that changed.
     fn gif(&self) -> Result<()> {
         if self.out.width > u16::MAX as u32 || self.out.height > u16::MAX as u32 {
             bail!("GIF can't be larger than 65535 pixels per side");
         }
+        let stride = self.out.width as usize * 4;
         let mut colors = PaletteBuilder::new();
-        self.render(|frame, changed| {
-            if changed {
-                colors.add(frame);
+        self.render(|frame, rows| {
+            if let Some(rows) = rows {
+                colors.add(&frame[rows.start * stride..rows.end * stride]);
             }
             Ok(())
         })?;
@@ -79,11 +82,15 @@ impl Job<'_> {
             self.out.height as u16,
             palette.colors(),
         )?;
-        let mut indices = vec![0u8; self.out.width as usize * self.out.height as usize];
+        let width = self.out.width as usize;
+        let mut indices = vec![0u8; width * self.out.height as usize];
         let secs = 1.0 / self.opts.fps as f64;
-        self.render(|frame, changed| {
-            if changed {
-                palette.map(frame, &mut indices);
+        self.render(|frame, rows| {
+            if let Some(rows) = rows {
+                palette.map(
+                    &frame[rows.start * stride..rows.end * stride],
+                    &mut indices[rows.start * width..rows.end * width],
+                );
             }
             Ok(gif.push(&indices, secs)?)
         })?;
@@ -108,9 +115,13 @@ impl Job<'_> {
     }
 
     /// Produce every output frame in order. `sink` gets the RGBA frame and
-    /// whether it differs from the previous one (unchanged frames aren't
-    /// re-rendered, which is most of them in a typical screen recording).
-    fn render(&self, mut sink: impl FnMut(&[u8], bool) -> Result<()>) -> Result<()> {
+    /// the rows that differ from the previous frame (`None` if none do).
+    /// Only those rows are re-rendered: in a typical screen recording most
+    /// frames change a little or not at all.
+    fn render(
+        &self,
+        mut sink: impl FnMut(&[u8], Option<Range<usize>>) -> Result<()>,
+    ) -> Result<()> {
         let opts = self.opts;
         let mut reader = open(opts)?;
         let mut planner = self
@@ -122,6 +133,7 @@ impl Job<'_> {
         let fps = opts.fps.max(1) as f64;
         let start = opts.trim_start.max(0.0);
         let frames = ((self.keep * fps).round() as u64).max(1);
+        let all = 0..self.out.height as usize;
         let mut scaled = vec![0u8; self.out.width as usize * self.out.height as usize * 4];
         let mut scratch = Vec::new();
         let mut last_view = None;
@@ -129,22 +141,26 @@ impl Job<'_> {
 
         for i in 0..frames {
             let t = i as f64 / fps;
-            let new_pixels = reader.advance_to(start + t)?;
+            let new_rows = reader.advance_to(start + t)?;
             let view = planner.as_mut().map_or(Rect::full(self.src), |p| p.next(t));
             let rings_active = rings.as_ref().is_some_and(|r| r.active_at(t));
-            // A ring that just finished still has to be erased.
-            let changed = i == 0
-                || new_pixels
-                || last_view != Some(view)
-                || rings_active
-                || rings_were_active;
-            if changed {
+            // Redraw everything when the camera moved or a ring is (or was
+            // just) on screen; otherwise only the rows under new pixels.
+            let rows = if i == 0 || last_view != Some(view) || rings_active || rings_were_active {
+                Some(all.clone())
+            } else {
+                new_rows
+                    .map(|r| affected_rows(r, view, self.out))
+                    .filter(|r| !r.is_empty())
+            };
+            if let Some(rows) = &rows {
                 crop_scale_rgba_smooth(
                     reader.frame(),
                     self.src,
                     view,
                     &mut scaled,
                     self.out,
+                    rows.clone(),
                     &mut scratch,
                 );
                 if let Some(r) = &rings {
@@ -153,7 +169,7 @@ impl Job<'_> {
             }
             last_view = Some(view);
             rings_were_active = rings_active;
-            sink(&scaled, changed)?;
+            sink(&scaled, rows)?;
         }
         Ok(())
     }
