@@ -24,7 +24,9 @@ bv tray
 ```
 
 1. A notification confirms better-video is running. Its icon is in the
-   taskbar tray (click **^** if it's hidden).
+   taskbar tray, but Windows 11 hides new tray icons: if you don't see it
+   (or a **^** leading to it), turn it on in **Settings › Personalization ›
+   Taskbar › Other system tray icons**. The hotkey works either way.
 2. **Click the icon** or press **Ctrl+Alt+R**. The screens dim: click a screen
    to record all of it, or drag around the part you want. Drag the handles to
    resize, or inside the selection to move it.
