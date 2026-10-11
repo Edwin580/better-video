@@ -31,7 +31,7 @@ use super::{
     canvas::{Canvas, Color, Rect},
     close, create, mouse_pos, run_loop, Handler,
 };
-use crate::ui::{Choices, PickRequest, Picked, Quality};
+use crate::ui::{Choices, PickRequest, Picked, Quality, ZoomMode};
 
 /// Smaller drags count as a click (select the whole screen).
 const MIN_DRAG: i32 = 8;
@@ -103,7 +103,7 @@ enum Button {
     Format(OutputFormat),
     Quality(Quality),
     Clicks,
-    Zoom,
+    Zoom(ZoomMode),
     Record,
     Cancel,
 }
@@ -248,7 +248,19 @@ impl Picker {
             .iter()
             .map(|&q| (Button::Quality(q), q.label(), c.quality == q))
             .collect();
-        let groups: [&[(Button, &str, bool)]; 4] = [
+        // "Zoom off" reads better than a bare "Off" next to the other groups.
+        let zooms: Vec<_> = ZoomMode::ALL
+            .iter()
+            .map(|&z| {
+                let label = if z == ZoomMode::Off {
+                    "Zoom off"
+                } else {
+                    z.label()
+                };
+                (Button::Zoom(z), label, c.zoom == z)
+            })
+            .collect();
+        let groups: [&[(Button, &str, bool)]; 5] = [
             &[
                 (
                     Button::Format(OutputFormat::Gif),
@@ -262,10 +274,8 @@ impl Picker {
                 ),
             ],
             &sizes,
-            &[
-                (Button::Clicks, "Show clicks", c.clicks),
-                (Button::Zoom, "Zoom on clicks", c.zoom),
-            ],
+            &[(Button::Clicks, "Show clicks", c.clicks)],
+            &zooms,
             &[
                 (Button::Record, "●  Record", true),
                 (Button::Cancel, "Cancel", false),
@@ -370,7 +380,7 @@ impl Picker {
             Button::Format(f) => c.format = f,
             Button::Quality(q) => c.quality = q,
             Button::Clicks => c.clicks = !c.clicks,
-            Button::Zoom => c.zoom = !c.zoom,
+            Button::Zoom(z) => c.zoom = z,
             Button::Record => return self.start_countdown(hwnd),
             Button::Cancel => return self.finish(hwnd, None),
         }

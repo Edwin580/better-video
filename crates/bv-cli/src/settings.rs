@@ -67,13 +67,19 @@ mod tests {
                 format: OutputFormat::Gif,
                 quality: Quality::Small,
                 clicks: true,
-                zoom: false,
+                zoom: crate::ui::ZoomMode::Hover,
             }),
             copy: Some(false),
             last_area: Some("640x480-100+0".parse().unwrap()),
         };
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
+        // Zoom used to be an on/off switch.
+        let old: Settings = serde_json::from_str(
+            r#"{"choices": {"format": "gif", "quality": "small", "clicks": false, "zoom": true}}"#,
+        )
+        .unwrap();
+        assert_eq!(old.choices.unwrap().zoom, crate::ui::ZoomMode::Click);
         let partial: Settings = serde_json::from_str(r#"{"copy": true}"#).unwrap();
         assert_eq!(partial.copy, Some(true));
         assert_eq!(partial.dir, None);
