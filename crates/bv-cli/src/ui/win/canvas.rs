@@ -67,6 +67,9 @@ pub struct Canvas {
     old: HGDIOBJ,
     bits: *mut u32,
     fonts: Vec<(i32, bool, HFONT)>,
+    /// The DC's original font, restored before ours are deleted (GDI won't
+    /// delete an object that is still selected).
+    old_font: Option<HGDIOBJ>,
 }
 
 impl Canvas {
@@ -98,6 +101,7 @@ impl Canvas {
                 old,
                 bits: bits as *mut u32,
                 fonts: Vec::new(),
+                old_font: None,
             }
         }
     }
@@ -200,7 +204,8 @@ impl Canvas {
         let text: Vec<u16> = s.encode_utf16().collect();
         let mut sz = SIZE { cx: 0, cy: 0 };
         unsafe {
-            SelectObject(self.dc, f);
+            let prev = SelectObject(self.dc, f);
+            self.old_font.get_or_insert(prev);
             GetTextExtentPoint32W(self.dc, text.as_ptr(), text.len() as i32, &mut sz);
         }
         (sz.cx, sz.cy)
@@ -291,6 +296,9 @@ impl Drop for Canvas {
         unsafe {
             SelectObject(self.dc, self.old);
             DeleteObject(self.bitmap);
+            if let Some(f) = self.old_font {
+                SelectObject(self.dc, f);
+            }
             for &(_, _, f) in &self.fonts {
                 DeleteObject(f);
             }
