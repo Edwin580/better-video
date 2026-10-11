@@ -1,3 +1,4 @@
+mod clipboard;
 mod tracker;
 
 use std::{
@@ -96,6 +97,9 @@ struct ExportArgs {
     /// Stay zoomed in and follow the cursor the whole time.
     #[arg(long)]
     zoom_follow: bool,
+    /// Copy the exported file to the clipboard.
+    #[arg(long, short = 'c')]
+    copy: bool,
     /// Draw a ring wherever you click.
     #[arg(long)]
     clicks: bool,
@@ -241,7 +245,7 @@ fn record(args: RecordArgs) -> Result<()> {
     if !args.keep_raw {
         let _ = std::fs::remove_file(&raw);
     }
-    report(&out);
+    report(&out, args.export.copy);
     Ok(())
 }
 
@@ -262,7 +266,7 @@ fn export_cmd(args: ExportCmd) -> Result<()> {
             "zoom/clicks need a cursor track; pass --cursor or record with --keep-raw"
         })?);
     }
-    report(&export(&opts)?);
+    report(&export(&opts)?, args.export.copy);
     Ok(())
 }
 
@@ -307,10 +311,16 @@ fn cursor_sidecar(raw: &Path) -> PathBuf {
     raw.with_extension("cursor.json")
 }
 
-fn report(out: &Path) {
+fn report(out: &Path, copy: bool) {
     let size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
     println!("{} ({:.1} MB)", out.display(), size as f64 / 1_048_576.0);
     if size > 10 * 1_048_576 {
         eprintln!("note: GitHub limits PR attachments to 10 MB; try --width 960, --fps 10 or --format mp4");
+    }
+    if copy {
+        match clipboard::copy_file(out) {
+            Ok(()) => eprintln!("copied to clipboard"),
+            Err(e) => eprintln!("warning: couldn't copy to clipboard: {e:#}"),
+        }
     }
 }
