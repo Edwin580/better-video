@@ -17,8 +17,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use bv_core::{
-    export, ffmpeg, zoom::ZoomTrigger, CaptureRegion, CursorTrack, ExportOptions, OutputFormat,
-    RecordOptions, Recording, ZoomConfig,
+    export, ffmpeg, monitor, zoom::ZoomTrigger, CaptureRegion, CursorTrack, ExportOptions,
+    MonitorChoice, OutputFormat, RecordOptions, Recording, ZoomConfig,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -46,6 +46,8 @@ enum Command {
     Tray(HotkeyArgs),
     /// Re-export a raw recording (e.g. with different zoom settings).
     Export(ExportCmd),
+    /// List connected monitors (for --monitor).
+    Monitors,
     /// Check that dependencies are installed.
     Doctor,
 }
@@ -76,9 +78,14 @@ struct HotkeyArgs {
 
 #[derive(Args, Clone)]
 struct CaptureArgs {
-    /// Capture only this region: WIDTHxHEIGHT+X+Y.
-    #[arg(long)]
+    /// Capture only this region: WIDTHxHEIGHT+X+Y (offsets may be negative,
+    /// e.g. 1920x1080-1920+0 for a monitor left of the main one).
+    #[arg(long, conflicts_with = "monitor")]
     region: Option<CaptureRegion>,
+    /// Screen to record: a number from `bv monitors`, `primary` or `all`
+    /// [default on Windows: primary].
+    #[arg(long, short = 'm')]
+    monitor: Option<MonitorChoice>,
     /// Screen to capture (X11 display, avfoundation device or gdigrab target).
     #[arg(long)]
     display: Option<String>,
@@ -206,14 +213,47 @@ impl ExportArgs {
 }
 
 fn main() -> Result<()> {
+    // Physical pixels everywhere, so monitor bounds, capture offsets and
+    // cursor positions agree on scaled displays.
+    monitor::set_dpi_aware();
     match Cli::parse().command {
         Command::Record(args) => record(args),
         Command::Hotkey(args) => hotkey_mode(args),
         #[cfg(feature = "tray")]
         Command::Tray(args) => tray::run(args),
         Command::Export(args) => export_cmd(args),
+        Command::Monitors => list_monitors(),
         Command::Doctor => doctor(),
     }
+}
+
+impl CaptureArgs {
+    /// The region to record: `--region`, else `--monitor`, else (on Windows,
+    /// where the desktop spans every screen) the primary monitor.
+    fn capture_region(&self) -> Result<Option<CaptureRegion>> {
+        if self.region.is_some() || self.display.is_some() {
+            return Ok(self.region);
+        }
+        let choice = match self.monitor {
+            Some(c) => c,
+            None if cfg!(windows) => MonitorChoice::Primary,
+            None => return Ok(None),
+        };
+        choice
+            .region(&monitor::monitors())
+            .map_err(anyhow::Error::msg)
+    }
+}
+
+fn list_monitors() -> Result<()> {
+    let list = monitor::monitors();
+    if list.is_empty() {
+        println!("Monitor listing isn't supported on this platform yet; use --region.");
+    }
+    for (i, m) in list.iter().enumerate() {
+        println!("{}: {m}  (--region {})", i + 1, m.region);
+    }
+    Ok(())
 }
 
 fn record(args: RecordArgs) -> Result<()> {
@@ -300,9 +340,10 @@ impl Session {
                     .context("bad output path")?,
             )
         };
+        let region = args.capture_region()?;
         let opts = RecordOptions {
             fps: args.capture_fps,
-            region: args.region,
+            region,
             display: args.display.clone(),
             max_duration: args.duration.map(Duration::from_secs_f64),
             ..RecordOptions::new(&raw)
@@ -310,7 +351,7 @@ impl Session {
 
         let recording = Recording::start(&opts)?;
         let tracker = if args.export.needs_cursor() {
-            let t = CursorTracker::start(recording.started(), args.region);
+            let t = CursorTracker::start(recording.started(), region);
             if t.is_none() {
                 eprintln!("warning: cursor tracking unavailable; exporting without zoom/clicks");
             }
