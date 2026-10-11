@@ -98,6 +98,10 @@ pub struct ExportOptions {
     /// Cursor-following zoom; needs `cursor`.
     pub zoom: Option<ZoomConfig>,
     pub cursor: Option<CursorTrack>,
+    /// Seconds to cut from the start of the recording.
+    pub trim_start: f64,
+    /// Seconds to cut from the end of the recording.
+    pub trim_end: f64,
 }
 
 impl ExportOptions {
@@ -115,6 +119,8 @@ impl ExportOptions {
             width: Some(1280),
             zoom: None,
             cursor: None,
+            trim_start: 0.0,
+            trim_end: 0.0,
         }
     }
 }
@@ -122,24 +128,49 @@ impl ExportOptions {
 pub fn export(opts: &ExportOptions) -> Result<PathBuf> {
     let info = ffmpeg::probe(&opts.input)?;
     let out_size = info.size.fit_width(opts.width.unwrap_or(info.size.width));
+    let input = input_args(opts, info.duration)?;
 
     match (&opts.zoom, &opts.cursor) {
         (Some(zoom), Some(track)) if !track.is_empty() => {
-            export_zoomed(opts, *zoom, track, info.size, out_size)?
+            let mut track = track.clone();
+            track.shift_earlier(opts.trim_start);
+            export_zoomed(opts, &input, *zoom, &track, info.size, out_size)?
         }
-        _ => export_plain(opts, out_size)?,
+        _ => export_plain(opts, &input, out_size)?,
     }
     Ok(opts.output.clone())
 }
 
+/// `-i` plus any seek/length options needed for trimming.
+fn input_args(opts: &ExportOptions, duration: f64) -> Result<Vec<String>> {
+    let (start, end) = (opts.trim_start.max(0.0), opts.trim_end.max(0.0));
+    let mut args = Vec::new();
+    if start > 0.0 || end > 0.0 {
+        let keep = trimmed_length(duration, start, end)?;
+        args.extend(["-ss".into(), format!("{start:.3}")]);
+        args.extend(["-t".into(), format!("{keep:.3}")]);
+    }
+    args.push("-i".into());
+    args.push(opts.input.to_string_lossy().into_owned());
+    Ok(args)
+}
+
+fn trimmed_length(duration: f64, start: f64, end: f64) -> Result<f64> {
+    let keep = duration - start - end;
+    if keep <= 0.0 {
+        bail!("trimming {start:.1}s + {end:.1}s leaves nothing of a {duration:.1}s recording");
+    }
+    Ok(keep)
+}
+
 /// No zoom: a single ffmpeg invocation does everything.
-fn export_plain(opts: &ExportOptions, out: Size) -> Result<()> {
+fn export_plain(opts: &ExportOptions, input: &[String], out: Size) -> Result<()> {
     let scale = format!(
         "fps={},scale={}:{}:flags=lanczos",
         opts.fps, out.width, out.height
     );
     let mut cmd = ffmpeg::ffmpeg();
-    cmd.arg("-y").arg("-i").arg(&opts.input);
+    cmd.arg("-y").args(input);
     match opts.format {
         // GIF already uses -filter_complex; prepend the scale chain to it.
         OutputFormat::Gif => {
@@ -168,14 +199,14 @@ fn export_plain(opts: &ExportOptions, out: Size) -> Result<()> {
 /// crop/scale it, then pipe the result into a second ffmpeg to encode.
 fn export_zoomed(
     opts: &ExportOptions,
+    input: &[String],
     zoom: ZoomConfig,
     track: &CursorTrack,
     src: Size,
     out: Size,
 ) -> Result<()> {
     let mut decoder = ffmpeg::ffmpeg()
-        .arg("-i")
-        .arg(&opts.input)
+        .args(input)
         .args(["-vf", &format!("fps={}", opts.fps)])
         .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
         .stdout(Stdio::piped())
@@ -248,4 +279,26 @@ fn read_frame(r: &mut impl Read, buf: &mut [u8]) -> Result<bool> {
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trim_args_only_when_trimming() {
+        let mut opts = ExportOptions::new("in.mkv", "out.gif", OutputFormat::Gif);
+        assert_eq!(input_args(&opts, 10.0).unwrap(), ["-i", "in.mkv"]);
+        opts.trim_start = 1.5;
+        opts.trim_end = 2.0;
+        assert_eq!(
+            input_args(&opts, 10.0).unwrap(),
+            ["-ss", "1.500", "-t", "6.500", "-i", "in.mkv"]
+        );
+    }
+
+    #[test]
+    fn rejects_trimming_everything() {
+        assert!(trimmed_length(3.0, 2.0, 1.0).is_err());
+    }
 }
