@@ -393,7 +393,11 @@ fn record(args: RecordArgs) -> Result<()> {
     while !stop.load(Ordering::Relaxed) && !session.finished() {
         thread::sleep(Duration::from_millis(50));
     }
-    session.finish().map(drop)
+    match session.finish() {
+        // Discarded from the recording pill.
+        Err(e) if e.is::<ui::Cancelled>() => Ok(()),
+        r => r.map(drop),
+    }
 }
 
 fn hotkey_mode(mut args: HotkeyArgs) -> Result<()> {
@@ -429,8 +433,11 @@ fn hotkey_mode(mut args: HotkeyArgs) -> Result<()> {
             }
             Some(_) if pressed || quitting || ended => {
                 if let Some(s) = session.take() {
-                    if let Err(e) = s.finish() {
-                        eprintln!("error: {e:#}");
+                    match s.finish() {
+                        // Discarded from the recording pill.
+                        Err(e) if e.is::<ui::Cancelled>() => {}
+                        Err(e) => eprintln!("error: {e:#}"),
+                        Ok(_) => {}
                     }
                 }
                 if quitting {
@@ -531,9 +538,14 @@ impl Session {
     }
 
     /// True once the duration limit passed, capture stopped by itself, or
-    /// the on-screen Stop button was clicked.
+    /// Stop or Discard was clicked on the pill.
     fn finished(&mut self) -> bool {
-        self.recording.finished() || self.indicator.as_ref().is_some_and(|i| i.stop_requested())
+        self.recording.finished()
+            || self
+                .indicator
+                .as_ref()
+                .and_then(|i| i.requested())
+                .is_some()
     }
 
     /// What was chosen in the area picker, if it was shown.
@@ -544,6 +556,8 @@ impl Session {
 
     /// Stop recording, export, and report the result.
     fn finish(mut self) -> Result<PathBuf> {
+        let discard =
+            self.indicator.as_ref().and_then(|i| i.requested()) == Some(ui::StopRequest::Discard);
         // Close the on-screen frame right away.
         self.indicator = None;
         let args = &self.args;
@@ -553,6 +567,11 @@ impl Session {
         let raw = recorded.path;
         if let Some(t) = &mut track {
             t.shift_earlier(recorded.first_frame_delay);
+        }
+        if discard {
+            let _ = std::fs::remove_file(&raw);
+            eprintln!("■ Discarded");
+            return Err(ui::Cancelled.into());
         }
         eprintln!("■ Stopped after {secs:.1}s, exporting…");
 
