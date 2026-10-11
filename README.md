@@ -31,7 +31,8 @@ bv doctor                 # checks ffmpeg + cursor tracking
 | `bv doctor` | Check dependencies. |
 
 Useful flags: `-z/--zoom`, `--zoom-follow`, `--zoom-level 2.5`, `-w/--width 960`,
-`--fps 10`, `-d/--duration 15`, `--region WxH+X+Y`.
+`--fps 10`, `-d/--duration 15`, `--region WxH+X+Y`,
+`--trim-start 0.5`, `--trim-end 1`.
 
 **Size tips:** GitHub caps PR attachments at 10 MB. MP4 is usually 3–10×
 smaller than GIF for the same clip and GitHub plays it inline; use GIF where
@@ -64,7 +65,7 @@ clipboard.
 - [ ] Desktop shell (tray/menu-bar app, e.g. Tauri) with a global hotkey and
       drag-to-select region
 - [ ] Copy the output file/path to the clipboard after export
-- [ ] Trim start/end before export
+- [x] Trim start/end before export
 - [x] Align cursor timestamps with ffmpeg's first frame
 - [ ] HiDPI: map cursor points → capture pixels on macOS/Windows scaling
 - [ ] Wayland capture (xdg-desktop-portal + PipeWire)

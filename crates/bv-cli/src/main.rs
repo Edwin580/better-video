@@ -99,6 +99,12 @@ struct ExportArgs {
     /// Zoom magnification.
     #[arg(long, default_value_t = 2.0)]
     zoom_level: f64,
+    /// Seconds to cut from the start (e.g. reaching for the mouse).
+    #[arg(long, default_value_t = 0.0, value_name = "SECS")]
+    trim_start: f64,
+    /// Seconds to cut from the end (e.g. pressing the stop key).
+    #[arg(long, default_value_t = 0.0, value_name = "SECS")]
+    trim_end: f64,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -148,6 +154,8 @@ impl ExportArgs {
             opts.fps = fps;
         }
         opts.zoom = self.zoom();
+        opts.trim_start = self.trim_start;
+        opts.trim_end = self.trim_end;
         opts
     }
 }
