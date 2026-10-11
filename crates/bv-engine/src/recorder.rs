@@ -110,7 +110,18 @@ fn run(
             // Sized lazily so a failed first grab doesn't cost the memory.
             frame = vec![0u8; writer_len(writer)];
         }
-        capture.grab(&mut frame)?;
+        match capture.grab(&mut frame) {
+            Ok(()) => {}
+            // The first grab failing means the capture can't work at all.
+            Err(e) if stats.captured == 0 => return Err(e),
+            // Later failures are usually transient (screen locked, UAC
+            // prompt on the secure desktop): keep the last good frame on
+            // screen and try again next tick rather than lose the clip.
+            Err(_) => {
+                wait(&mut next, interval);
+                continue;
+            }
+        }
         if stats.captured == 0 {
             stats.first_frame = t;
         }
@@ -118,18 +129,23 @@ fn run(
         if writer.push(t, &frame)? {
             stats.stored += 1;
         }
-        // Fixed cadence; if a grab overruns, skip ahead rather than burst.
-        next += interval;
-        let now = Instant::now();
-        if next > now {
-            thread::sleep(next - now);
-        } else {
-            next = now;
-        }
+        wait(&mut next, interval);
     }
     Ok(stats)
 }
 
 fn writer_len(w: &RawWriter) -> usize {
     w.width() * w.height() * 4
+}
+
+/// Sleep until the next tick at a fixed cadence; if a grab overran, skip
+/// ahead rather than burst.
+fn wait(next: &mut Instant, interval: Duration) {
+    *next += interval;
+    let now = Instant::now();
+    if *next > now {
+        thread::sleep(*next - now);
+    } else {
+        *next = now;
+    }
 }

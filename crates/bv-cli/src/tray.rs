@@ -26,7 +26,7 @@ use tray_icon::{
 };
 
 use crate::{
-    default_output,
+    fresh_output,
     hotkey::{self, EdgeDetector, Hotkey},
     human_size,
     settings::Settings,
@@ -80,7 +80,7 @@ impl Items {
             key_label: key_label.to_owned(),
         };
         items.show_dir(dir);
-        items.show_idle();
+        items.show_idle(has_area);
         items
     }
 
@@ -109,7 +109,9 @@ impl Items {
             .set_text(format!("Saving to {}", dir.display()));
     }
 
-    fn show_idle(&self) {
+    /// Ready to record; "same area again" only when there is one.
+    fn show_idle(&self, can_repeat: bool) {
+        self.again.set_enabled(can_repeat);
         let label = if cfg!(windows) {
             "New recording…"
         } else {
@@ -149,6 +151,13 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
         eprintln!("warning: keyboard access unavailable; hotkey disabled (menu still works)");
     }
     let mut settings = Settings::load();
+    // Forget an area whose monitor has since been unplugged or moved.
+    let monitors = bv_core::monitor::monitors();
+    if !monitors.is_empty() {
+        settings.last_area = settings
+            .last_area
+            .filter(|&a| bv_core::monitor::is_on_screen(a, &monitors));
+    }
     let mut dir = args
         .dir
         .clone()
@@ -285,22 +294,20 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
                         State::Recording(session)
                     }
                     Err(None) => {
-                        items.show_idle();
+                        items.show_idle(settings.last_area.is_some());
                         State::Idle
                     }
                     Err(Some(e)) => {
                         eprintln!("error: {e}");
                         ui::toast("Couldn't start recording", &e, None);
-                        items.show_idle();
+                        items.show_idle(settings.last_area.is_some());
                         State::Idle
                     }
                 };
-                items.again.set_enabled(settings.last_area.is_some());
             }
             Event::UserEvent(UserEvent::Exported(result)) => {
                 state = State::Idle;
-                items.show_idle();
-                items.again.set_enabled(settings.last_area.is_some());
+                items.show_idle(settings.last_area.is_some());
                 match result {
                     Ok(path) => {
                         items.show_last(&path);
@@ -353,7 +360,7 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
                         // screen from --monitor/--region.
                         None => capture.select = cfg!(windows),
                     }
-                    let output = dir.join(default_output(choices.format));
+                    let output = fresh_output(&dir, choices.format);
                     items.show_busy(if capture.select {
                         "Choosing area…"
                     } else {

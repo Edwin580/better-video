@@ -77,6 +77,27 @@ impl fmt::Display for Monitor {
     }
 }
 
+/// Whether `region` lies entirely on connected monitors, e.g. to check a
+/// remembered area after the display layout changed.
+pub fn is_on_screen(region: CaptureRegion, monitors: &[Monitor]) -> bool {
+    let contains = |m: &Monitor, x: i32, y: i32| {
+        let r = m.region;
+        x >= r.x && y >= r.y && x < r.x + r.width as i32 && y < r.y + r.height as i32
+    };
+    let (x1, y1) = (
+        region.x + region.width as i32 - 1,
+        region.y + region.height as i32 - 1,
+    );
+    [
+        (region.x, region.y),
+        (x1, region.y),
+        (region.x, y1),
+        (x1, y1),
+    ]
+    .iter()
+    .all(|&(x, y)| monitors.iter().any(|m| contains(m, x, y)))
+}
+
 /// Bounds of all monitors together (Windows; empty elsewhere).
 pub fn virtual_screen() -> CaptureRegion {
     let a = bv_engine::capture::virtual_screen();
@@ -205,5 +226,26 @@ mod tests {
         assert_eq!(left.unwrap().unwrap().x, -1920);
         assert!(MonitorChoice::Index(3).region(&list).is_err());
         assert!("0".parse::<MonitorChoice>().is_err());
+    }
+
+    #[test]
+    fn checks_areas_against_connected_monitors() {
+        let list = [mon(-1920, false), mon(0, true)];
+        let r = |x, y, w, h| CaptureRegion {
+            x,
+            y,
+            width: w,
+            height: h,
+        };
+        assert!(is_on_screen(r(100, 100, 640, 480), &list));
+        assert!(is_on_screen(r(-200, 0, 400, 300), &list), "spans both");
+        assert!(
+            !is_on_screen(r(1800, 0, 400, 300), &list),
+            "off the right edge"
+        );
+        assert!(
+            !is_on_screen(r(-2500, 0, 400, 300), &list),
+            "monitor unplugged"
+        );
     }
 }
