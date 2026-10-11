@@ -14,8 +14,10 @@ use crate::ffmpeg::{self, Platform};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureRegion {
-    pub x: u32,
-    pub y: u32,
+    /// Offsets in virtual-desktop pixels; negative for monitors left of or
+    /// above the primary one.
+    pub x: i32,
+    pub y: i32,
     pub width: u32,
     pub height: u32,
 }
@@ -24,18 +26,34 @@ impl std::str::FromStr for CaptureRegion {
     type Err = String;
 
     /// Parses `WIDTHxHEIGHT+X+Y` (X11 geometry style), e.g. `1280x720+0+0`.
+    /// Either offset may use `-` instead of `+`: `1920x1080-1920+0`.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let err = || format!("invalid region {s:?}, expected WIDTHxHEIGHT+X+Y");
-        let (size, rest) = s.split_once('+').ok_or_else(err)?;
+        let s = s.trim();
+        let split = s.find(['+', '-']).ok_or_else(err)?;
+        let (size, offsets) = s.split_at(split);
         let (w, h) = size.split_once('x').ok_or_else(err)?;
-        let (x, y) = rest.split_once('+').ok_or_else(err)?;
-        let n = |v: &str| v.trim().parse::<u32>().map_err(|_| err());
+        // The second sign starts the Y offset.
+        let second = offsets[1..].find(['+', '-']).ok_or_else(err)? + 1;
+        let (x, y) = offsets.split_at(second);
+        let dim = |v: &str| match v.trim().parse::<u32>() {
+            Ok(n) if n > 0 => Ok(n),
+            _ => Err(err()),
+        };
+        // `i32::from_str` accepts a leading `+` or `-`.
+        let off = |v: &str| v.parse::<i32>().map_err(|_| err());
         Ok(Self {
-            x: n(x)?,
-            y: n(y)?,
-            width: n(w)?,
-            height: n(h)?,
+            x: off(x)?,
+            y: off(y)?,
+            width: dim(w)?,
+            height: dim(h)?,
         })
+    }
+}
+
+impl std::fmt::Display for CaptureRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}x{}{:+}{:+}", self.width, self.height, self.x, self.y)
     }
 }
 
@@ -201,6 +219,17 @@ mod tests {
             }
         );
         assert!("1280x720".parse::<CaptureRegion>().is_err());
+        assert!("0x720+0+0".parse::<CaptureRegion>().is_err());
+    }
+
+    #[test]
+    fn parses_negative_offsets_and_round_trips() {
+        let r: CaptureRegion = "1920x1080-1920+0".parse().unwrap();
+        assert_eq!((r.x, r.y), (-1920, 0));
+        let r: CaptureRegion = "800x600+5-1080".parse().unwrap();
+        assert_eq!((r.x, r.y), (5, -1080));
+        assert_eq!(r.to_string(), "800x600+5-1080");
+        assert_eq!(r.to_string().parse::<CaptureRegion>(), Ok(r));
     }
 
     #[test]
