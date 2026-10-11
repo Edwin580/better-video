@@ -9,6 +9,7 @@ bv record                 # record until Enter / Ctrl+C → ./bv-<ts>.gif
 bv record demo.mp4 -z     # MP4, zooms in around each click
 bv record --zoom-follow   # stay zoomed and follow the cursor
 bv record --clicks        # draw a ring wherever you click
+bv record -c              # copy the result to the clipboard
 bv record -d 10 --region 1280x720+0+0 --width 960
 ```
 
@@ -16,7 +17,8 @@ bv record -d 10 --region 1280x720+0+0 --width 960
 
 Requirements: Rust (stable) and [`ffmpeg`](https://ffmpeg.org/download.html) on
 your `PATH` (or point `BV_FFMPEG` / `BV_FFPROBE` at it). On Linux, cursor zoom
-needs X11 headers (`libx11-dev`).
+needs X11 headers (`libx11-dev`), and `--copy` needs `xclip` (X11) or
+`wl-clipboard` (Wayland).
 
 ```sh
 cargo install --path crates/bv-cli
@@ -65,7 +67,7 @@ clipboard.
 
 - [ ] Desktop shell (tray/menu-bar app, e.g. Tauri) with a global hotkey and
       drag-to-select region
-- [ ] Copy the output file/path to the clipboard after export
+- [x] Copy the output file to the clipboard after export
 - [x] Trim start/end before export
 - [x] Align cursor timestamps with ffmpeg's first frame
 - [ ] HiDPI: map cursor points → capture pixels on macOS/Windows scaling
