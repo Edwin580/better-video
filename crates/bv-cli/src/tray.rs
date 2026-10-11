@@ -218,17 +218,19 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
                     Ok(t) => {
                         set_icon(&t, false);
                         tray = Some(t);
-                        let how = if cfg!(windows) {
-                            "Click the tray icon (it may be under ^ on the taskbar)"
+                        // Windows 11 hides new tray icons (sometimes without
+                        // even a ^ to reach them), so lead with the hotkey and
+                        // say where to turn the icon on.
+                        let body = if cfg!(windows) {
+                            format!(
+                                "Press {} or click the tray icon to record.\n\
+                                 No icon? Settings › Taskbar › Other system tray icons.",
+                                args.key
+                            )
                         } else {
-                            "Use the menu bar / tray icon"
+                            format!("Press {} or use the menu bar icon to record.", args.key)
                         };
-                        ui::toast(
-                            ui::ToastKind::Info,
-                            "better-video is running",
-                            &format!("{how} or press {} to record.", args.key),
-                            None,
-                        );
+                        ui::toast(ui::ToastKind::Info, "better-video is running", &body, None);
                         eprintln!(
                             "better-video is in your tray; recordings are saved to {}",
                             dir.display()
