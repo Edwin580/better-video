@@ -1,6 +1,8 @@
 mod clipboard;
 mod hotkey;
 mod tracker;
+#[cfg(feature = "tray")]
+mod tray;
 
 use std::{
     io::{self, BufRead, IsTerminal},
@@ -39,6 +41,9 @@ enum Command {
     Record(RecordArgs),
     /// Wait in the background; a global hotkey starts and stops recording.
     Hotkey(HotkeyArgs),
+    /// Menu bar / system tray app with the same hotkey.
+    #[cfg(feature = "tray")]
+    Tray(HotkeyArgs),
     /// Re-export a raw recording (e.g. with different zoom settings).
     Export(ExportCmd),
     /// Check that dependencies are installed.
@@ -58,9 +63,10 @@ struct HotkeyArgs {
     /// Key combination that starts and stops recording.
     #[arg(long, default_value = "ctrl+alt+r")]
     key: String,
-    /// Folder to save recordings in.
-    #[arg(long, default_value = ".")]
-    dir: PathBuf,
+    /// Folder to save recordings in [default: current folder for `hotkey`,
+    /// ~/Videos/better-video (~/Movies on macOS) for `tray`].
+    #[arg(long)]
+    dir: Option<PathBuf>,
     /// Don't copy each recording to the clipboard.
     #[arg(long)]
     no_copy: bool,
@@ -68,7 +74,7 @@ struct HotkeyArgs {
     capture: CaptureArgs,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 struct CaptureArgs {
     /// Capture only this region: WIDTHxHEIGHT+X+Y.
     #[arg(long)]
@@ -104,7 +110,7 @@ struct ExportCmd {
     export: ExportArgs,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 struct ExportArgs {
     /// Output format (inferred from the output extension if omitted).
     #[arg(long, short)]
@@ -141,7 +147,7 @@ struct ExportArgs {
     trim_end: f64,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Format {
     Gif,
     Mp4,
@@ -203,6 +209,8 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Record(args) => record(args),
         Command::Hotkey(args) => hotkey_mode(args),
+        #[cfg(feature = "tray")]
+        Command::Tray(args) => tray::run(args),
         Command::Export(args) => export_cmd(args),
         Command::Doctor => doctor(),
     }
@@ -220,7 +228,7 @@ fn record(args: RecordArgs) -> Result<()> {
     while !stop.load(Ordering::Relaxed) && !session.finished() {
         thread::sleep(Duration::from_millis(50));
     }
-    session.finish(&args.capture)
+    session.finish(&args.capture).map(drop)
 }
 
 fn hotkey_mode(mut args: HotkeyArgs) -> Result<()> {
@@ -228,7 +236,8 @@ fn hotkey_mode(mut args: HotkeyArgs) -> Result<()> {
     let mut keys = hotkey::keyboard().context(
         "keyboard access unavailable (needs X11 on Linux; Input Monitoring permission on macOS)",
     )?;
-    std::fs::create_dir_all(&args.dir)?;
+    let dir = args.dir.clone().unwrap_or_else(|| PathBuf::from("."));
+    std::fs::create_dir_all(&dir)?;
     args.capture.export.copy |= !args.no_copy;
     let format = args.capture.export.format(None);
     let quit = stop_signal(false)?;
@@ -243,7 +252,7 @@ fn hotkey_mode(mut args: HotkeyArgs) -> Result<()> {
         match &session {
             None if quitting => return Ok(()),
             None if pressed => {
-                let output = args.dir.join(default_output(format));
+                let output = dir.join(default_output(format));
                 match Session::start(&args.capture, output, format) {
                     Ok(s) => {
                         eprintln!("● Recording… press {} to stop", args.key);
@@ -322,7 +331,7 @@ impl Session {
     }
 
     /// Stop recording, export, and report the result.
-    fn finish(self, args: &CaptureArgs) -> Result<()> {
+    fn finish(self, args: &CaptureArgs) -> Result<PathBuf> {
         let secs = self.recording.elapsed().as_secs_f64();
         let mut track = self.tracker.map(CursorTracker::finish);
         let recorded = self.recording.stop()?;
@@ -344,8 +353,9 @@ impl Session {
         if !args.keep_raw {
             let _ = std::fs::remove_file(&raw);
         }
-        report(&result?, args.export.copy);
-        Ok(())
+        let out = result?;
+        report(&out, args.export.copy);
+        Ok(out)
     }
 }
 
