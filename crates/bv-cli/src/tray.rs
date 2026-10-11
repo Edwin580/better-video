@@ -31,7 +31,7 @@ enum UserEvent {
 
 enum State {
     Idle,
-    Recording(Session),
+    Recording(Box<Session>),
     Exporting,
 }
 
@@ -241,7 +241,7 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
                         Ok(s) => {
                             items.show_recording();
                             tray.iter().for_each(|t| set_icon(t, true));
-                            State::Recording(s)
+                            State::Recording(Box::new(s))
                         }
                         Err(e) => {
                             eprintln!("error: {e:#}");
@@ -256,7 +256,7 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
                     let capture = capture.clone();
                     let proxy = proxy.clone();
                     thread::spawn(move || {
-                        let result = session.finish(&capture).map_err(|e| format!("{e:#}"));
+                        let result = (*session).finish(&capture).map_err(|e| format!("{e:#}"));
                         let _ = proxy.send_event(UserEvent::Exported(result));
                     });
                     State::Exporting
