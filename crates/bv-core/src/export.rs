@@ -13,6 +13,7 @@ use crate::{
     cursor::CursorTrack,
     ffmpeg,
     geometry::{Rect, Size},
+    native,
     overlay::ClickRings,
     render::crop_scale_rgba,
     zoom::{ZoomConfig, ZoomPlanner},
@@ -130,18 +131,26 @@ impl ExportOptions {
 }
 
 pub fn export(opts: &ExportOptions) -> Result<PathBuf> {
-    let info = ffmpeg::probe(&opts.input)?;
-    let out_size = info.size.fit_width(opts.width.unwrap_or(info.size.width));
-    let input = input_args(opts, info.duration)?;
-
     let wants_cursor = opts.zoom.is_some() || opts.click_rings;
-    match &opts.cursor {
+    let track = match &opts.cursor {
         Some(track) if wants_cursor && !track.is_empty() => {
             let mut track = track.clone();
             track.shift_earlier(opts.trim_start);
-            export_rendered(opts, &input, &track, info.size, out_size)?
+            Some(track)
         }
-        _ => export_plain(opts, &input, out_size)?,
+        _ => None,
+    };
+    if bv_engine::raw::is_raw(&opts.input) {
+        native::export(opts, track.as_ref())?;
+        return Ok(opts.output.clone());
+    }
+
+    let info = ffmpeg::probe(&opts.input)?;
+    let out_size = info.size.fit_width(opts.width.unwrap_or(info.size.width));
+    let input = input_args(opts, info.duration)?;
+    match &track {
+        Some(track) => export_rendered(opts, &input, track, info.size, out_size)?,
+        None => export_plain(opts, &input, out_size)?,
     }
     Ok(opts.output.clone())
 }
@@ -160,7 +169,7 @@ fn input_args(opts: &ExportOptions, duration: f64) -> Result<Vec<String>> {
     Ok(args)
 }
 
-fn trimmed_length(duration: f64, start: f64, end: f64) -> Result<f64> {
+pub(crate) fn trimmed_length(duration: f64, start: f64, end: f64) -> Result<f64> {
     let keep = duration - start - end;
     if keep <= 0.0 {
         bail!("trimming {start:.1}s + {end:.1}s leaves nothing of a {duration:.1}s recording");
@@ -218,17 +227,7 @@ fn export_rendered(
         .spawn()
         .context("starting ffmpeg decoder")?;
 
-    let mut encoder = ffmpeg::ffmpeg()
-        .arg("-y")
-        .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
-        .args(["-s", &format!("{}x{}", out.width, out.height)])
-        .args(["-r", &opts.fps.to_string()])
-        .args(["-i", "-"])
-        .args(opts.format.encode_args())
-        .arg(&opts.output)
-        .stdin(Stdio::piped())
-        .spawn()
-        .context("starting ffmpeg encoder")?;
+    let mut encoder = spawn_encoder(opts, out)?;
 
     let result = pump_frames(&mut decoder, &mut encoder, opts, track, src, out);
     // Close the encoder's stdin so it can finish, even on error.
@@ -243,6 +242,22 @@ fn export_rendered(
         bail!("ffmpeg encoder failed ({enc_status})");
     }
     Ok(())
+}
+
+/// ffmpeg reading raw RGBA frames of size `out` on stdin and encoding them
+/// in `opts.format`.
+pub(crate) fn spawn_encoder(opts: &ExportOptions, out: Size) -> Result<Child> {
+    ffmpeg::ffmpeg()
+        .arg("-y")
+        .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
+        .args(["-s", &format!("{}x{}", out.width, out.height)])
+        .args(["-r", &opts.fps.to_string()])
+        .args(["-i", "-"])
+        .args(opts.format.encode_args())
+        .arg(&opts.output)
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("starting ffmpeg encoder (MP4/WebM export needs ffmpeg)")
 }
 
 fn pump_frames(
