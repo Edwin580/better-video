@@ -117,6 +117,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "device_query",
+ "serde",
  "serde_json",
  "tao",
  "tray-icon",

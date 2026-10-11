@@ -1,5 +1,7 @@
 mod clipboard;
 mod hotkey;
+#[cfg(feature = "tray")]
+mod settings;
 mod tracker;
 #[cfg(feature = "tray")]
 mod tray;
@@ -13,7 +15,7 @@ use std::{
         Arc,
     },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -408,6 +410,8 @@ struct Session {
     recording: Recording,
     tracker: Option<CursorTracker>,
     indicator: Option<ui::Indicator>,
+    /// What was chosen in the area picker, if it was shown.
+    picked: Option<ui::Picked>,
     /// Settings for this clip: the caller's, plus anything picked in the
     /// options bar.
     args: CaptureArgs,
@@ -418,7 +422,7 @@ struct Session {
 impl Session {
     fn start(args: &CaptureArgs, mut output: PathBuf, mut format: OutputFormat) -> Result<Self> {
         let mut args = args.clone();
-        let region = if args.select {
+        let picked = if args.select {
             let req = ui::PickRequest {
                 choices: args.export.choices(format),
                 save_dir: absolute(&output)
@@ -433,9 +437,13 @@ impl Session {
                 format = picked.choices.format;
                 output.set_extension(format.extension());
             }
-            Some(picked.region)
+            Some(picked)
         } else {
-            args.capture_region()?
+            None
+        };
+        let region = match picked {
+            Some(p) => Some(p.region),
+            None => args.capture_region()?,
         };
 
         let engine = args.engine();
@@ -476,6 +484,7 @@ impl Session {
             recording,
             tracker,
             indicator,
+            picked,
             args,
             output,
             format,
@@ -486,6 +495,12 @@ impl Session {
     /// the on-screen Stop button was clicked.
     fn finished(&mut self) -> bool {
         self.recording.finished() || self.indicator.as_ref().is_some_and(|i| i.stop_requested())
+    }
+
+    /// What was chosen in the area picker, if it was shown.
+    #[cfg_attr(not(feature = "tray"), allow(dead_code))]
+    fn picked(&self) -> Option<ui::Picked> {
+        self.picked
     }
 
     /// Stop recording, export, and report the result.
@@ -582,11 +597,69 @@ fn stop_signal(enter: bool) -> Result<Arc<AtomicBool>> {
     Ok(stop)
 }
 
+/// `bv-2026-10-11_15-48-12.gif`: local time on Windows, UTC elsewhere.
 fn default_output(format: OutputFormat) -> PathBuf {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    let (y, mo, d, h, mi, s) = now();
+    PathBuf::from(format!(
+        "bv-{y:04}-{mo:02}-{d:02}_{h:02}-{mi:02}-{s:02}.{}",
+        format.extension()
+    ))
+}
+
+#[cfg(windows)]
+fn now() -> (u32, u32, u32, u32, u32, u32) {
+    let mut t = unsafe { std::mem::zeroed() };
+    unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut t) };
+    let t: windows_sys::Win32::Foundation::SYSTEMTIME = t;
+    let f = |v: u16| v as u32;
+    (
+        f(t.wYear),
+        f(t.wMonth),
+        f(t.wDay),
+        f(t.wHour),
+        f(t.wMinute),
+        f(t.wSecond),
+    )
+}
+
+#[cfg(not(windows))]
+fn now() -> (u32, u32, u32, u32, u32, u32) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    PathBuf::from(format!("bv-{ts}.{}", format.extension()))
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    let (y, m, d) = civil_from_days(days as i64);
+    (
+        y as u32,
+        m,
+        d,
+        (rem / 3600) as u32,
+        (rem / 60 % 60) as u32,
+        (rem % 60) as u32,
+    )
+}
+
+/// Days since 1970-01-01 to (year, month, day), proleptic Gregorian.
+#[cfg(not(windows))]
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + (m <= 2) as i64, m, d)
+}
+
+/// "412 KB", "3.4 MB".
+fn human_size(bytes: u64) -> String {
+    if bytes < 1_048_576 {
+        format!("{} KB", bytes.div_ceil(1024))
+    } else {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    }
 }
 
 fn cursor_sidecar(raw: &Path) -> PathBuf {
@@ -595,7 +668,7 @@ fn cursor_sidecar(raw: &Path) -> PathBuf {
 
 fn report(out: &Path, copy: bool) {
     let size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
-    println!("{} ({:.1} MB)", out.display(), size as f64 / 1_048_576.0);
+    println!("Saved {} ({})", absolute(out).display(), human_size(size));
     if size > 10 * 1_048_576 {
         eprintln!("note: GitHub limits PR attachments to 10 MB; try --width 960, --fps 10 or --format mp4");
     }
@@ -604,5 +677,35 @@ fn report(out: &Path, copy: bool) {
             Ok(()) => eprintln!("copied to clipboard"),
             Err(e) => eprintln!("warning: couldn't copy to clipboard: {e:#}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_read_naturally() {
+        assert_eq!(human_size(1000), "1 KB");
+        assert_eq!(human_size(421_000), "412 KB");
+        assert_eq!(human_size(3_565_158), "3.4 MB");
+    }
+
+    #[test]
+    fn output_names_sort_by_time() {
+        let name = default_output(OutputFormat::Gif);
+        let name = name.to_string_lossy();
+        assert!(
+            name.starts_with("bv-20") && name.ends_with(".gif"),
+            "{name}"
+        );
+        assert_eq!(name.len(), "bv-2026-10-11_15-48-12.gif".len());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn civil_dates() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(20_737), (2026, 10, 11));
     }
 }
