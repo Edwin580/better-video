@@ -77,6 +77,17 @@ impl fmt::Display for Monitor {
     }
 }
 
+/// Bounds of all monitors together (Windows; empty elsewhere).
+pub fn virtual_screen() -> CaptureRegion {
+    let a = bv_engine::capture::virtual_screen();
+    CaptureRegion {
+        x: a.x,
+        y: a.y,
+        width: a.width,
+        height: a.height,
+    }
+}
+
 #[cfg(windows)]
 pub use win::{monitors, set_dpi_aware};
 
