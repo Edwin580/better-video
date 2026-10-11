@@ -111,17 +111,24 @@ engines; Windows uses the native one by default (`--engine ffmpeg` switches).
 
 **Native engine** (`bv-engine`, Windows, no ffmpeg needed for GIF):
 
-1. **Record** — GDI grabs the region (cursor included) at the export frame
-   rate. Each frame is split into 32×32 tiles and only the tiles that changed
-   are written, LZ4-compressed, to a `.bvraw` file, so an idle screen costs
-   almost nothing.
-2. **Export** — frames are replayed at the output frame rate; unchanged ones
-   aren't re-rendered. Downscaling box-averages so text stays readable. For
-   GIF, a first pass collects colours (an exact palette when the clip uses at
-   most 255, median cut otherwise) and a second pass encodes with a built-in
-   LZW coder: each frame stores only the rectangle that changed, unchanged
-   pixels in it are transparent, and identical frames merge into one.
-   MP4/WebM frames are piped to ffmpeg.
+1. **Record** — the region is grabbed at the export frame rate, cursor
+   included. On one monitor that's DXGI desktop duplication: the GPU copies
+   the screen and Windows says when nothing changed, so an idle screen costs
+   almost nothing. Areas spanning monitors (or machines where duplication
+   isn't available) use GDI `BitBlt`. Frames are compared in the capture
+   buffer's own BGRA, 32×32 tiles at a time, and only changed tiles are
+   copied and written, LZ4-compressed, to a `.bvraw` file.
+2. **Export** — frames are replayed at the output frame rate, and only the
+   output rows under changed pixels are re-rendered, re-counted and
+   re-mapped. Downscaling box-averages so text stays readable. For GIF, a
+   first pass collects colours (an exact palette when the clip uses at most
+   255, median cut otherwise) and a second pass encodes with a built-in LZW
+   coder: each frame stores only the rectangle that changed, unchanged pixels
+   in it are transparent, and identical frames merge into one. MP4/WebM
+   frames are piped to ffmpeg.
+
+`BV_CAPTURE=gdi` forces GDI capture; `BV_PROFILE=1` prints where recording
+and export time went.
 
 **ffmpeg engine** (Linux, macOS, or `--engine ffmpeg`):
 

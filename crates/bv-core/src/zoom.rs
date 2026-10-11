@@ -73,14 +73,26 @@ impl Spring {
         Self { x, v: 0.0 }
     }
 
-    fn step(&mut self, target: f64, omega: f64, dt: f64) {
+    /// Advance by `dt` toward `target`. Within `eps` of it and nearly
+    /// still, it snaps exactly onto it: an exponential approach never
+    /// quite arrives, and sub-pixel drift would change every frame (a
+    /// faint shimmer, and a GIF that can't skip unchanged frames).
+    fn step(&mut self, target: f64, omega: f64, dt: f64, eps: f64) {
         let c1 = self.x - target;
         let c2 = self.v + omega * c1;
         let e = (-omega * dt).exp();
         self.x = target + (c1 + c2 * dt) * e;
         self.v = (c2 - omega * (c1 + c2 * dt)) * e;
+        if (self.x - target).abs() < eps && self.v.abs() < eps * omega {
+            self.x = target;
+            self.v = 0.0;
+        }
     }
 }
+
+/// Snap thresholds: 0.1% of zoom, a quarter of a source pixel.
+const SETTLE_LOG_ZOOM: f64 = 1e-3;
+const SETTLE_PX: f64 = 0.25;
 
 /// Produces one viewport per output frame. Stateful (it eases toward the
 /// target), so frames must be requested in order via [`ZoomPlanner::next`].
@@ -158,10 +170,10 @@ impl<'a> ZoomPlanner<'a> {
         self.last_t = Some(t);
         // A critically damped spring settles (to ~1%) in about 6.6 / omega.
         let omega = 6.6 / self.cfg.smoothing_secs.max(0.05);
-        self.log_zoom.step(level.ln(), omega, dt);
+        self.log_zoom.step(level.ln(), omega, dt, SETTLE_LOG_ZOOM);
         // Pan a little faster than zoom so the subject stays in frame.
-        self.cx.step(self.target.0, omega * 1.25, dt);
-        self.cy.step(self.target.1, omega * 1.25, dt);
+        self.cx.step(self.target.0, omega * 1.25, dt, SETTLE_PX);
+        self.cy.step(self.target.1, omega * 1.25, dt, SETTLE_PX);
 
         Rect::zoomed(self.bounds, self.log_zoom.x.exp(), self.cx.x, self.cy.x)
     }
@@ -434,6 +446,23 @@ mod tests {
         let p = plan(&ZoomConfig::default(), &tr, Size::new(1000, 600));
         assert_eq!(p.spans.len(), 1, "{p:?}");
         assert_eq!(p.aims.len(), 2, "each click still aims: {p:?}");
+    }
+
+    #[test]
+    fn settles_exactly_so_still_frames_are_identical() {
+        // Click, then hold still: once settled, consecutive views must be
+        // bit-identical (no sub-pixel drift).
+        let tr = track(&[
+            (0.0, 600.0, 300.0, false),
+            (0.5, 600.0, 300.0, true),
+            (0.6, 600.0, 300.0, false),
+            (8.0, 600.0, 300.0, false),
+        ]);
+        let mut p = ZoomPlanner::new(ZoomConfig::default(), &tr, Size::new(1000, 600));
+        let views: Vec<Rect> = (0..60).map(|i| p.next(i as f64 / 30.0)).collect();
+        assert_eq!(views[57], views[58]);
+        assert_eq!(views[58], views[59]);
+        assert!((views[59].width - 500.0).abs() < 1e-9, "{:?}", views[59]);
     }
 
     #[test]
