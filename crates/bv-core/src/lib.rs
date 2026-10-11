@@ -13,6 +13,7 @@ pub mod cursor;
 pub mod export;
 pub mod ffmpeg;
 pub mod geometry;
+pub mod overlay;
 pub mod record;
 pub mod render;
 pub mod zoom;

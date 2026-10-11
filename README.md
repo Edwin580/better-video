@@ -8,6 +8,7 @@ MP4 you can drop straight into a PR body**, optionally with a camera that
 bv record                 # record until Enter / Ctrl+C → ./bv-<ts>.gif
 bv record demo.mp4 -z     # MP4, zooms in around each click
 bv record --zoom-follow   # stay zoomed and follow the cursor
+bv record --clicks        # draw a ring wherever you click
 bv record -d 10 --region 1280x720+0+0 --width 960
 ```
 
@@ -72,4 +73,5 @@ clipboard.
 - [ ] Native capture backends (ScreenCaptureKit, DXGI) to drop the ffmpeg
       runtime dependency, or ship ffmpeg as a sidecar
 - [ ] Optional [gifski](https://gif.ski) encoder for higher-quality GIFs
-- [ ] Click highlight rings / keystroke overlay
+- [x] Click highlight rings
+- [ ] Keystroke overlay
