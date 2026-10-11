@@ -35,7 +35,7 @@ pub fn crop_scale_rgba(src: &[u8], src_size: Size, view: Rect, dst: &mut [u8], d
         let r0 = &src[y0 * sw * 4..(y0 + 1) * sw * 4];
         let r1 = &src[y1 * sw * 4..(y1 + 1) * sw * 4];
 
-        for (px, &(x0, x1, wx)) in row.chunks_exact_mut(4).zip(&xs) {
+        for (px, &(x0, x1, wx)) in row.as_chunks_mut::<4>().0.iter_mut().zip(&xs) {
             for c in 0..4 {
                 let top = r0[x0 + c] as u32 * (256 - wx) + r0[x1 + c] as u32 * wx;
                 let bot = r1[x0 + c] as u32 * (256 - wx) + r1[x1 + c] as u32 * wx;
