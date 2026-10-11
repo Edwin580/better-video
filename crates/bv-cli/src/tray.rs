@@ -244,7 +244,9 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
                             State::Recording(Box::new(s))
                         }
                         Err(e) => {
-                            eprintln!("error: {e:#}");
+                            if !e.is::<crate::ui::Cancelled>() {
+                                eprintln!("error: {e:#}");
+                            }
                             State::Idle
                         }
                     }
