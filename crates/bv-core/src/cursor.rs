@@ -29,6 +29,14 @@ impl CursorTrack {
         self.samples.push(sample);
     }
 
+    /// Move every sample `dt` seconds earlier, e.g. to compensate for the
+    /// delay before the first video frame.
+    pub fn shift_earlier(&mut self, dt: f64) {
+        for s in &mut self.samples {
+            s.t -= dt;
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.samples.is_empty()
     }

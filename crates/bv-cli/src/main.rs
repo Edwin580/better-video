@@ -190,7 +190,7 @@ fn record(args: RecordArgs) -> Result<()> {
     let stop = stop_signal()?;
     let recording = Recording::start(&opts)?;
     let tracker = if args.export.zoom().is_some() {
-        let t = CursorTracker::start(Instant::now(), args.region);
+        let t = CursorTracker::start(recording.started(), args.region);
         if t.is_none() {
             eprintln!("warning: cursor tracking unavailable; exporting without zoom");
         }
@@ -205,8 +205,12 @@ fn record(args: RecordArgs) -> Result<()> {
         thread::sleep(Duration::from_millis(50));
     }
     let secs = recording.elapsed().as_secs_f64();
-    let raw = recording.stop()?;
-    let track = tracker.map(CursorTracker::finish);
+    let mut track = tracker.map(CursorTracker::finish);
+    let recorded = recording.stop()?;
+    let raw = recorded.path;
+    if let Some(t) = &mut track {
+        t.shift_earlier(recorded.first_frame_delay);
+    }
     eprintln!("■ Stopped after {secs:.1}s, exporting…");
 
     if args.keep_raw {

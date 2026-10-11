@@ -65,8 +65,7 @@ clipboard.
       drag-to-select region
 - [ ] Copy the output file/path to the clipboard after export
 - [ ] Trim start/end before export
-- [ ] Align cursor timestamps with ffmpeg's first frame (currently assumes
-      capture starts instantly; can be off by ~100–300 ms)
+- [x] Align cursor timestamps with ffmpeg's first frame
 - [ ] HiDPI: map cursor points → capture pixels on macOS/Windows scaling
 - [ ] Wayland capture (xdg-desktop-portal + PipeWire)
 - [ ] Native capture backends (ScreenCaptureKit, DXGI) to drop the ffmpeg
