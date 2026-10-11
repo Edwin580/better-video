@@ -1,4 +1,10 @@
 //! Menu bar (macOS) / system tray (Windows, Linux) app.
+//!
+//! Click the icon or press the hotkey to record. On Windows that opens the
+//! area picker, whose options bar holds the format/size/click settings;
+//! elsewhere it records the primary screen with the remembered settings.
+//! The menu (right-click on Windows) shows where recordings are saved and
+//! opens the last one.
 
 use std::{
     path::{Path, PathBuf},
@@ -9,131 +15,130 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use bv_core::OutputFormat;
 use tao::{
     event::{Event, StartCause},
     event_loop::{ControlFlow, EventLoopBuilder},
 };
 use tray_icon::{
-    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
-    Icon, TrayIcon, TrayIconBuilder,
+    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 
 use crate::{
     default_output,
     hotkey::{self, EdgeDetector, Hotkey},
-    stop_signal, CaptureArgs, Format, HotkeyArgs, Session,
+    human_size,
+    settings::Settings,
+    stop_signal,
+    ui::{self, Choices, Quality},
+    HotkeyArgs, Session,
 };
 
 enum UserEvent {
     Menu(MenuEvent),
+    Tray(TrayIconEvent),
+    /// A session started; `Err(None)` means the picker was cancelled.
+    Started(Result<Box<Session>, Option<String>>),
     Exported(Result<PathBuf, String>),
+    Folder(Option<PathBuf>),
 }
 
 enum State {
     Idle,
+    /// Picker open, or capture starting.
+    Starting,
     Recording(Box<Session>),
     Exporting,
 }
 
 struct Items {
     record: MenuItem,
-    zoom: CheckMenuItem,
-    clicks: CheckMenuItem,
-    copy: CheckMenuItem,
-    formats: Vec<(CheckMenuItem, Format)>,
+    again: MenuItem,
     last: MenuItem,
+    reveal: MenuItem,
+    saving_to: MenuItem,
     open_dir: MenuItem,
+    change_dir: MenuItem,
+    copy: CheckMenuItem,
     quit: MenuItem,
     key_label: String,
 }
 
 impl Items {
-    fn new(capture: &CaptureArgs, key_label: &str) -> Self {
-        let e = &capture.export;
-        let current = e.format(None);
-        let formats = [
-            (Format::Gif, "GIF"),
-            (Format::Mp4, "MP4"),
-            (Format::Webm, "WebM"),
-        ]
-        .into_iter()
-        .map(|(f, label)| {
-            let checked = bv_core::OutputFormat::from(f) == current;
-            (CheckMenuItem::new(label, true, checked, None), f)
-        })
-        .collect();
+    fn new(key_label: &str, dir: &Path, copy: bool, has_area: bool) -> Self {
         let items = Self {
             record: MenuItem::new("", true, None),
-            zoom: CheckMenuItem::new("Zoom on clicks", true, e.zoom || e.zoom_follow, None),
-            clicks: CheckMenuItem::new("Highlight clicks", true, e.clicks, None),
-            copy: CheckMenuItem::new("Copy to clipboard", true, e.copy, None),
-            formats,
+            again: MenuItem::new("Record same area again", has_area, None),
             last: MenuItem::new("Open last recording", false, None),
+            reveal: MenuItem::new("Show last recording in folder", false, None),
+            saving_to: MenuItem::new("", false, None),
             open_dir: MenuItem::new("Open recordings folder", true, None),
-            quit: MenuItem::new("Quit", true, None),
+            change_dir: MenuItem::new("Change folder…", true, None),
+            copy: CheckMenuItem::new("Copy each recording to the clipboard", true, copy, None),
+            quit: MenuItem::new("Quit better-video", true, None),
             key_label: key_label.to_owned(),
         };
+        items.show_dir(dir);
         items.show_idle();
         items
     }
 
     fn menu(&self) -> Result<Menu> {
-        let format = Submenu::new("Format", true);
-        for (item, _) in &self.formats {
-            format.append(item)?;
-        }
-        Ok(Menu::with_items(&[
+        let sep = PredefinedMenuItem::separator;
+        let menu = Menu::with_items(&[
             &self.record,
-            &PredefinedMenuItem::separator(),
-            &self.zoom,
-            &self.clicks,
-            &self.copy,
-            &format,
-            &PredefinedMenuItem::separator(),
+            &self.again,
+            &sep(),
             &self.last,
+            &self.reveal,
+            &sep(),
+            &self.saving_to,
             &self.open_dir,
-            &PredefinedMenuItem::separator(),
-            &self.quit,
-        ])?)
+        ])?;
+        if cfg!(windows) {
+            menu.append(&self.change_dir)?;
+        }
+        menu.append_items(&[&sep(), &self.copy, &sep(), &self.quit])?;
+        Ok(menu)
+    }
+
+    /// The save folder is always visible in the menu.
+    fn show_dir(&self, dir: &Path) {
+        self.saving_to
+            .set_text(format!("Saving to {}", dir.display()));
     }
 
     fn show_idle(&self) {
+        let label = if cfg!(windows) {
+            "New recording…"
+        } else {
+            "Start recording"
+        };
         self.record
-            .set_text(format!("Start recording ({})", self.key_label));
+            .set_text(format!("{label}  ({})", self.key_label));
         self.record.set_enabled(true);
+    }
+
+    fn show_busy(&self, text: &str) {
+        self.record.set_text(text);
+        self.record.set_enabled(false);
+        self.again.set_enabled(false);
     }
 
     fn show_recording(&self) {
         self.record
-            .set_text(format!("Stop recording ({})", self.key_label));
+            .set_text(format!("Stop recording  ({})", self.key_label));
+        self.record.set_enabled(true);
     }
 
-    fn show_exporting(&self) {
-        self.record.set_text("Exporting…");
-        self.record.set_enabled(false);
-    }
-
-    fn select_format(&self, format: Format) {
-        for (item, f) in &self.formats {
-            item.set_checked(*f == format);
-        }
-    }
-
-    /// Copy the menu's current settings into `capture`.
-    fn apply(&self, capture: &mut CaptureArgs) {
-        let e = &mut capture.export;
-        if !self.zoom.is_checked() {
-            e.zoom = false;
-            e.zoom_follow = false;
-        } else if !e.zoom_follow {
-            e.zoom = true;
-        }
-        e.clicks = self.clicks.is_checked();
-        e.copy = self.copy.is_checked();
-        if let Some((_, f)) = self.formats.iter().find(|(i, _)| i.is_checked()) {
-            e.format = Some(*f);
-            e.gif = false;
-        }
+    fn show_last(&self, path: &Path) {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let size = std::fs::metadata(path).map_or(0, |m| m.len());
+        self.last
+            .set_text(format!("Open {name}  ({})", human_size(size)));
+        self.last.set_enabled(true);
+        self.reveal.set_enabled(true);
     }
 }
 
@@ -143,10 +148,22 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
     if keys.is_none() {
         eprintln!("warning: keyboard access unavailable; hotkey disabled (menu still works)");
     }
-    let dir = args.dir.clone().unwrap_or_else(default_dir);
+    let mut settings = Settings::load();
+    let mut dir = args
+        .dir
+        .clone()
+        .or_else(|| settings.dir.clone())
+        .unwrap_or_else(default_dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let mut capture = args.capture.clone();
-    capture.export.copy |= !args.no_copy;
+    let base = args.capture.clone();
+    // Small GIFs unless told otherwise: that's what this is for.
+    let mut choices = settings.choices.unwrap_or(Choices {
+        format: OutputFormat::Gif,
+        quality: Quality::Small,
+        clicks: base.export.clicks,
+        zoom: base.export.zoom || base.export.zoom_follow,
+    });
+    let copy = !args.no_copy && settings.copy.unwrap_or(true);
     let quit = stop_signal(false)?;
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
@@ -155,31 +172,56 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
     MenuEvent::set_event_handler(Some(move |e| {
         let _ = menu_proxy.send_event(UserEvent::Menu(e));
     }));
+    let tray_proxy = proxy.clone();
+    TrayIconEvent::set_event_handler(Some(move |e| {
+        let _ = tray_proxy.send_event(UserEvent::Tray(e));
+    }));
 
-    let items = Items::new(&capture, &args.key);
+    let items = Items::new(&args.key, &dir, copy, settings.last_area.is_some());
     let menu = items.menu()?;
     let mut tray: Option<TrayIcon> = None;
     let mut state = State::Idle;
     let mut edge = EdgeDetector::default();
     let mut last: Option<PathBuf> = None;
+    let launched = Instant::now();
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + hotkey::POLL_INTERVAL);
         let mut toggle = false;
+        let mut again = false;
 
         match event {
             // macOS requires the tray to be created once the loop is running.
             Event::NewEvents(StartCause::Init) => {
                 match TrayIconBuilder::new()
                     .with_menu(Box::new(menu.clone()))
-                    .with_tooltip("better-video")
+                    // On Windows left-click records and the menu is on
+                    // right-click.
+                    .with_menu_on_left_click(!cfg!(windows))
+                    .with_tooltip(format!(
+                        "better-video — click or press {} to record",
+                        args.key
+                    ))
                     .with_icon(icon(false))
                     .build()
                 {
                     Ok(t) => {
                         set_icon(&t, false);
                         tray = Some(t);
-                        eprintln!("better-video is in your menu bar / tray");
+                        let how = if cfg!(windows) {
+                            "Click the tray icon (it may be under ^ on the taskbar)"
+                        } else {
+                            "Use the menu bar / tray icon"
+                        };
+                        ui::toast(
+                            "better-video is running",
+                            &format!("{how} or press {} to record.", args.key),
+                            None,
+                        );
+                        eprintln!(
+                            "better-video is in your tray; recordings are saved to {}",
+                            dir.display()
+                        );
                     }
                     Err(e) => {
                         eprintln!("error: couldn't create tray icon: {e}");
@@ -187,72 +229,147 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
                     }
                 }
             }
+            Event::UserEvent(UserEvent::Tray(TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            })) if cfg!(windows) => toggle = true,
             Event::UserEvent(UserEvent::Menu(e)) => {
                 let id = e.id();
                 if id == items.record.id() {
                     toggle = true;
+                } else if id == items.again.id() {
+                    again = true;
                 } else if id == items.quit.id() {
                     quit.store(true, Ordering::Relaxed);
                 } else if id == items.open_dir.id() {
-                    open_path(&dir);
+                    ui::reveal(&dir);
                 } else if id == items.last.id() {
                     if let Some(p) = &last {
                         open_path(p);
                     }
-                } else if let Some((_, f)) = items.formats.iter().find(|(i, _)| i.id() == id) {
-                    // Behave like radio buttons.
-                    items.select_format(*f);
+                } else if id == items.reveal.id() {
+                    if let Some(p) = &last {
+                        ui::reveal(p);
+                    }
+                } else if id == items.change_dir.id() {
+                    let (proxy, start) = (proxy.clone(), dir.clone());
+                    thread::spawn(move || {
+                        let _ = proxy.send_event(UserEvent::Folder(ui::choose_folder(&start)));
+                    });
+                } else if id == items.copy.id() {
+                    settings.copy = Some(items.copy.is_checked());
+                    settings.save();
                 }
+            }
+            Event::UserEvent(UserEvent::Folder(Some(new))) => match std::fs::create_dir_all(&new) {
+                Ok(()) => {
+                    dir = new;
+                    items.show_dir(&dir);
+                    settings.dir = Some(dir.clone());
+                    settings.save();
+                }
+                Err(e) => eprintln!("error: can't use {}: {e}", new.display()),
+            },
+            Event::UserEvent(UserEvent::Started(result)) => {
+                state = match result {
+                    Ok(session) => {
+                        if let Some(p) = session.picked() {
+                            choices = p.choices;
+                            settings.choices = Some(choices);
+                            settings.last_area = Some(p.region);
+                            settings.save();
+                        }
+                        items.show_recording();
+                        tray.iter().for_each(|t| set_icon(t, true));
+                        State::Recording(session)
+                    }
+                    Err(None) => {
+                        items.show_idle();
+                        State::Idle
+                    }
+                    Err(Some(e)) => {
+                        eprintln!("error: {e}");
+                        ui::toast("Couldn't start recording", &e, None);
+                        items.show_idle();
+                        State::Idle
+                    }
+                };
+                items.again.set_enabled(settings.last_area.is_some());
             }
             Event::UserEvent(UserEvent::Exported(result)) => {
                 state = State::Idle;
                 items.show_idle();
+                items.again.set_enabled(settings.last_area.is_some());
                 match result {
                     Ok(path) => {
+                        items.show_last(&path);
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
-                        items.last.set_text(format!("Open {name}"));
-                        items.last.set_enabled(true);
+                        let size = std::fs::metadata(&path).map_or(0, |m| m.len());
+                        let copied = if items.copy.is_checked() {
+                            " · copied to clipboard"
+                        } else {
+                            ""
+                        };
+                        ui::toast(
+                            &format!("Saved {name} ({})", human_size(size)),
+                            &format!("In {}{copied}. Click to show it.", dir.display()),
+                            Some(path.clone()),
+                        );
                         if let Some(t) = &tray {
                             let _ = t.set_tooltip(Some(format!("better-video — saved {name}")));
                         }
                         last = Some(path);
                     }
-                    Err(e) => eprintln!("error: {e}"),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        ui::toast("Couldn't save the recording", &e, None);
+                    }
                 }
             }
             _ => {}
         }
 
         if let Some(k) = keys.as_mut() {
-            toggle |= edge.pressed(key.held(&k()));
+            // Ignore a hotkey still held from launching the app.
+            let pressed = edge.pressed(key.held(&k()));
+            toggle |= pressed && launched.elapsed().as_millis() > 500;
         }
         if let State::Recording(s) = &mut state {
             toggle |= s.finished();
         }
         let quitting = quit.load(Ordering::Relaxed);
 
-        if toggle || quitting {
+        if toggle || again || quitting {
             state = match std::mem::replace(&mut state, State::Exporting) {
                 State::Idle if quitting => State::Idle,
                 State::Idle => {
-                    items.apply(&mut capture);
-                    let format = capture.export.format(None);
-                    match Session::start(&capture, dir.join(default_output(format)), format) {
-                        Ok(s) => {
-                            items.show_recording();
-                            tray.iter().for_each(|t| set_icon(t, true));
-                            State::Recording(Box::new(s))
-                        }
-                        Err(e) => {
-                            if !e.is::<crate::ui::Cancelled>() {
-                                eprintln!("error: {e:#}");
-                            }
-                            State::Idle
-                        }
+                    let mut capture = base.clone();
+                    capture.export.apply(&choices);
+                    capture.export.copy = items.copy.is_checked();
+                    match settings.last_area.filter(|_| again) {
+                        Some(area) => capture.region = Some(area),
+                        // Windows asks what to record; elsewhere it's the
+                        // screen from --monitor/--region.
+                        None => capture.select = cfg!(windows),
                     }
+                    let output = dir.join(default_output(choices.format));
+                    items.show_busy(if capture.select {
+                        "Choosing area…"
+                    } else {
+                        "Starting…"
+                    });
+                    let proxy = proxy.clone();
+                    thread::spawn(move || {
+                        let result = Session::start(&capture, output, choices.format)
+                            .map(Box::new)
+                            .map_err(|e| (!e.is::<ui::Cancelled>()).then(|| format!("{e:#}")));
+                        let _ = proxy.send_event(UserEvent::Started(result));
+                    });
+                    State::Starting
                 }
                 State::Recording(session) => {
-                    items.show_exporting();
+                    items.show_busy("Saving…");
                     tray.iter().for_each(|t| set_icon(t, false));
                     let proxy = proxy.clone();
                     thread::spawn(move || {
@@ -261,8 +378,9 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
                     });
                     State::Exporting
                 }
-                // Wait for the export; quitting resumes once it lands.
-                State::Exporting => State::Exporting,
+                // Wait for the picker or the export; quitting resumes once
+                // it lands.
+                s @ (State::Starting | State::Exporting) => s,
             };
         }
 
@@ -287,6 +405,7 @@ fn default_dir() -> PathBuf {
     home.join(videos).join("better-video")
 }
 
+/// Open a file with its default app.
 fn open_path(path: &Path) {
     let program = if cfg!(target_os = "macos") {
         "open"

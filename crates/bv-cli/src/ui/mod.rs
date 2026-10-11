@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use bv_core::{CaptureRegion, OutputFormat};
+use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
 mod win;
@@ -26,7 +27,8 @@ impl std::fmt::Display for Cancelled {
 impl std::error::Error for Cancelled {}
 
 /// Output size/frame-rate presets offered in the options bar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Quality {
     Small,
     Medium,
@@ -72,7 +74,7 @@ impl Quality {
 }
 
 /// What the options bar lets the user change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Choices {
     pub format: OutputFormat,
     pub quality: Quality,
@@ -148,4 +150,64 @@ impl Indicator {
             false
         }
     }
+}
+
+/// A notification in the corner of the main screen; clicking it shows
+/// `reveal` in the file manager. Doesn't block.
+#[cfg(feature = "tray")]
+pub fn toast(title: &str, body: &str, reveal: Option<PathBuf>) {
+    #[cfg(windows)]
+    win::toast::show(title.to_owned(), body.to_owned(), reveal);
+    #[cfg(not(windows))]
+    {
+        let _ = reveal;
+        eprintln!("{title} — {body}");
+    }
+}
+
+/// Show `path` selected in the file manager (or open it, if a folder).
+#[cfg(feature = "tray")]
+pub fn reveal(path: &std::path::Path) {
+    #[cfg(windows)]
+    win::toast::reveal(path);
+    #[cfg(not(windows))]
+    {
+        let dir = if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        let program = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        if let Err(e) = std::process::Command::new(program).arg(dir).spawn() {
+            eprintln!("error: couldn't run {program}: {e}");
+        }
+    }
+}
+
+/// Ask for a folder with the system dialog (Windows). Blocks; `None` if
+/// cancelled or unsupported.
+#[cfg(feature = "tray")]
+pub fn choose_folder(start: &std::path::Path) -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    // The .NET folder dialog via PowerShell: no COM plumbing needed here.
+    let script = format!(
+        "Add-Type -AssemblyName System.Windows.Forms; \
+         $d = New-Object System.Windows.Forms.FolderBrowserDialog; \
+         $d.Description = 'Save better-video recordings in'; \
+         $d.SelectedPath = '{}'; \
+         if ($d.ShowDialog() -eq 'OK') {{ $d.SelectedPath }}",
+        start.display().to_string().replace('\'', "''")
+    );
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-STA", "-Command", &script])
+        .output()
+        .ok()?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (!path.is_empty()).then(|| PathBuf::from(path))
 }
