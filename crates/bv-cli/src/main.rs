@@ -1,4 +1,5 @@
 mod clipboard;
+mod hotkey;
 mod tracker;
 
 use std::{
@@ -19,7 +20,10 @@ use bv_core::{
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::tracker::CursorTracker;
+use crate::{
+    hotkey::{EdgeDetector, Hotkey},
+    tracker::CursorTracker,
+};
 
 /// Record your screen and get a small GIF/MP4 you can drop into a PR.
 #[derive(Parser)]
@@ -33,6 +37,8 @@ struct Cli {
 enum Command {
     /// Record the screen, then export. Stop with Enter or Ctrl+C.
     Record(RecordArgs),
+    /// Wait in the background; a global hotkey starts and stops recording.
+    Hotkey(HotkeyArgs),
     /// Re-export a raw recording (e.g. with different zoom settings).
     Export(ExportCmd),
     /// Check that dependencies are installed.
@@ -43,6 +49,27 @@ enum Command {
 struct RecordArgs {
     /// Output file. Defaults to ./bv-<timestamp>.<format>.
     output: Option<PathBuf>,
+    #[command(flatten)]
+    capture: CaptureArgs,
+}
+
+#[derive(Args)]
+struct HotkeyArgs {
+    /// Key combination that starts and stops recording.
+    #[arg(long, default_value = "ctrl+alt+r")]
+    key: String,
+    /// Folder to save recordings in.
+    #[arg(long, default_value = ".")]
+    dir: PathBuf,
+    /// Don't copy each recording to the clipboard.
+    #[arg(long)]
+    no_copy: bool,
+    #[command(flatten)]
+    capture: CaptureArgs,
+}
+
+#[derive(Args)]
+struct CaptureArgs {
     /// Capture only this region: WIDTHxHEIGHT+X+Y.
     #[arg(long)]
     region: Option<CaptureRegion>,
@@ -175,78 +202,151 @@ impl ExportArgs {
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Record(args) => record(args),
+        Command::Hotkey(args) => hotkey_mode(args),
         Command::Export(args) => export_cmd(args),
         Command::Doctor => doctor(),
     }
 }
 
 fn record(args: RecordArgs) -> Result<()> {
-    let format = args.export.format(args.output.as_deref());
+    let format = args.capture.export.format(args.output.as_deref());
     let output = args
         .output
         .clone()
         .unwrap_or_else(|| default_output(format));
-    let raw = if args.keep_raw {
-        output.with_extension("raw.mkv")
-    } else {
-        let dir = std::env::temp_dir().join("better-video");
-        std::fs::create_dir_all(&dir)?;
-        dir.join(
-            output
-                .with_extension("raw.mkv")
-                .file_name()
-                .context("bad output path")?,
-        )
-    };
-
-    let opts = RecordOptions {
-        fps: args.capture_fps,
-        region: args.region,
-        display: args.display.clone(),
-        max_duration: args.duration.map(Duration::from_secs_f64),
-        ..RecordOptions::new(&raw)
-    };
-
-    let stop = stop_signal()?;
-    let recording = Recording::start(&opts)?;
-    let tracker = if args.export.needs_cursor() {
-        let t = CursorTracker::start(recording.started(), args.region);
-        if t.is_none() {
-            eprintln!("warning: cursor tracking unavailable; exporting without zoom/clicks");
-        }
-        t
-    } else {
-        None
-    };
-
+    let stop = stop_signal(true)?;
+    let mut session = Session::start(&args.capture, output, format)?;
     eprintln!("● Recording… press Enter or Ctrl+C to stop");
-    let mut recording = recording;
-    while !stop.load(Ordering::Relaxed) && !recording.finished() {
+    while !stop.load(Ordering::Relaxed) && !session.finished() {
         thread::sleep(Duration::from_millis(50));
     }
-    let secs = recording.elapsed().as_secs_f64();
-    let mut track = tracker.map(CursorTracker::finish);
-    let recorded = recording.stop()?;
-    let raw = recorded.path;
-    if let Some(t) = &mut track {
-        t.shift_earlier(recorded.first_frame_delay);
-    }
-    eprintln!("■ Stopped after {secs:.1}s, exporting…");
+    session.finish(&args.capture)
+}
 
-    if args.keep_raw {
-        if let Some(t) = &track {
-            t.save(&cursor_sidecar(&raw))?;
+fn hotkey_mode(mut args: HotkeyArgs) -> Result<()> {
+    let key: Hotkey = args.key.parse().map_err(anyhow::Error::msg)?;
+    let mut keys = hotkey::keyboard().context(
+        "keyboard access unavailable (needs X11 on Linux; Input Monitoring permission on macOS)",
+    )?;
+    std::fs::create_dir_all(&args.dir)?;
+    args.capture.export.copy |= !args.no_copy;
+    let format = args.capture.export.format(None);
+    let quit = stop_signal(false)?;
+    let mut edge = EdgeDetector::default();
+    let mut session: Option<Session> = None;
+
+    eprintln!("Press {} to start/stop recording, Ctrl+C to quit", args.key);
+    loop {
+        let pressed = edge.pressed(key.held(&keys()));
+        let quitting = quit.load(Ordering::Relaxed);
+        let ended = session.as_mut().is_some_and(Session::finished);
+        match &session {
+            None if quitting => return Ok(()),
+            None if pressed => {
+                let output = args.dir.join(default_output(format));
+                match Session::start(&args.capture, output, format) {
+                    Ok(s) => {
+                        eprintln!("● Recording… press {} to stop", args.key);
+                        session = Some(s);
+                    }
+                    Err(e) => eprintln!("error: {e:#}"),
+                }
+            }
+            Some(_) if pressed || quitting || ended => {
+                if let Some(s) = session.take() {
+                    if let Err(e) = s.finish(&args.capture) {
+                        eprintln!("error: {e:#}");
+                    }
+                }
+                if quitting {
+                    return Ok(());
+                }
+                eprintln!("Ready. Press {} to record again", args.key);
+            }
+            _ => {}
         }
+        thread::sleep(hotkey::POLL_INTERVAL);
+    }
+}
+
+/// One recording from start to exported file.
+struct Session {
+    recording: Recording,
+    tracker: Option<CursorTracker>,
+    output: PathBuf,
+    format: OutputFormat,
+}
+
+impl Session {
+    fn start(args: &CaptureArgs, output: PathBuf, format: OutputFormat) -> Result<Self> {
+        let raw = if args.keep_raw {
+            output.with_extension("raw.mkv")
+        } else {
+            let dir = std::env::temp_dir().join("better-video");
+            std::fs::create_dir_all(&dir)?;
+            dir.join(
+                output
+                    .with_extension("raw.mkv")
+                    .file_name()
+                    .context("bad output path")?,
+            )
+        };
+        let opts = RecordOptions {
+            fps: args.capture_fps,
+            region: args.region,
+            display: args.display.clone(),
+            max_duration: args.duration.map(Duration::from_secs_f64),
+            ..RecordOptions::new(&raw)
+        };
+
+        let recording = Recording::start(&opts)?;
+        let tracker = if args.export.needs_cursor() {
+            let t = CursorTracker::start(recording.started(), args.region);
+            if t.is_none() {
+                eprintln!("warning: cursor tracking unavailable; exporting without zoom/clicks");
+            }
+            t
+        } else {
+            None
+        };
+        Ok(Self {
+            recording,
+            tracker,
+            output,
+            format,
+        })
     }
 
-    let mut eopts = args.export.options(raw.clone(), output, format);
-    eopts.cursor = track;
-    let out = export(&eopts)?;
-    if !args.keep_raw {
-        let _ = std::fs::remove_file(&raw);
+    fn finished(&mut self) -> bool {
+        self.recording.finished()
     }
-    report(&out, args.export.copy);
-    Ok(())
+
+    /// Stop recording, export, and report the result.
+    fn finish(self, args: &CaptureArgs) -> Result<()> {
+        let secs = self.recording.elapsed().as_secs_f64();
+        let mut track = self.tracker.map(CursorTracker::finish);
+        let recorded = self.recording.stop()?;
+        let raw = recorded.path;
+        if let Some(t) = &mut track {
+            t.shift_earlier(recorded.first_frame_delay);
+        }
+        eprintln!("■ Stopped after {secs:.1}s, exporting…");
+
+        if args.keep_raw {
+            if let Some(t) = &track {
+                t.save(&cursor_sidecar(&raw))?;
+            }
+        }
+
+        let mut eopts = args.export.options(raw.clone(), self.output, self.format);
+        eopts.cursor = track;
+        let result = export(&eopts);
+        if !args.keep_raw {
+            let _ = std::fs::remove_file(&raw);
+        }
+        report(&result?, args.export.copy);
+        Ok(())
+    }
 }
 
 fn export_cmd(args: ExportCmd) -> Result<()> {
@@ -284,13 +384,14 @@ fn doctor() -> Result<()> {
     Ok(())
 }
 
-/// Flag set by Ctrl+C or by pressing Enter (when attached to a terminal).
-fn stop_signal() -> Result<Arc<AtomicBool>> {
+/// Flag set by Ctrl+C, or by pressing Enter (when `enter` and attached to
+/// a terminal).
+fn stop_signal(enter: bool) -> Result<Arc<AtomicBool>> {
     let stop = Arc::new(AtomicBool::new(false));
     let s = stop.clone();
     ctrlc::set_handler(move || s.store(true, Ordering::Relaxed))
         .context("installing Ctrl+C handler")?;
-    if io::stdin().is_terminal() {
+    if enter && io::stdin().is_terminal() {
         let s = stop.clone();
         thread::spawn(move || {
             let _ = io::stdin().lock().lines().next();
