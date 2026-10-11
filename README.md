@@ -7,7 +7,7 @@ MP4 you can drop straight into a PR body**, optionally with a camera that
 ```sh
 bv record                 # record until Enter / Ctrl+C → ./bv-2026-10-11_15-48-12.gif
 bv record demo.mp4 -z     # MP4, zooms in around each click
-bv record --zoom-follow   # stay zoomed and follow the cursor
+bv record --zoom-on hover # zoom where the cursor rests (also click, follow)
 bv record --clicks        # draw a ring wherever you click
 bv record -c              # copy the result to the clipboard
 bv record -s              # pick a screen or drag out an area first (Windows)
@@ -80,7 +80,16 @@ by default. Pick another with `-m 2` (numbers from
 offsets may be negative for screens left of or above the primary one, e.g.
 `--region 1920x1080-1920+0`.
 
-Useful flags: `-z/--zoom`, `--zoom-follow`, `--zoom-level 2.5`, `-w/--width 960`,
+**Zoom:** the camera eases in and out on springs (no snapping) and only pans
+when the cursor nears the edge of the zoomed view. It zooms in on each click
+(`click`), where the cursor comes to rest (`hover`), either
+(`click-or-hover`), or stays zoomed and follows the cursor (`follow`).
+`--zoom-smooth` sets roughly how long it takes to settle (default 0.8 s) and
+`--zoom-hold` how long it stays in. The `--select` bar offers Off / Click /
+Hover / Follow.
+
+Useful flags: `-z/--zoom`, `--zoom-on click|hover|click-or-hover|follow`,
+`--zoom-level 2.5`, `--zoom-smooth 1.2`, `--zoom-hold 2`, `-w/--width 960`,
 `--fps 10`, `-d/--duration 15`, `-m/--monitor 2`, `--region WxH+X+Y`,
 `--trim-start 0.5`, `--trim-end 1`.
 
@@ -147,4 +156,5 @@ clipboard.
       duplication on Windows for high frame rates
 - [ ] Optional [gifski](https://gif.ski) encoder for higher-quality GIFs
 - [x] Click highlight rings
+- [x] Smooth, spring-based zoom with click / hover / follow triggers
 - [ ] Keystroke overlay

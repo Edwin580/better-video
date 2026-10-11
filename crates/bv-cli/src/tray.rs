@@ -170,7 +170,7 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
         format: OutputFormat::Gif,
         quality: Quality::Small,
         clicks: base.export.clicks,
-        zoom: base.export.zoom || base.export.zoom_follow,
+        zoom: ui::ZoomMode::from_trigger(base.export.trigger()),
     });
     let copy = !args.no_copy && settings.copy.unwrap_or(true);
     let quit = stop_signal(false)?;
