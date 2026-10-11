@@ -43,9 +43,15 @@ bv doctor                 # checks ffmpeg + cursor tracking
 | `bv doctor` | Check dependencies. |
 
 **Choosing what to record:** `-s/--select` dims every screen before recording:
-click a screen to record all of it, or drag out an area. Esc cancels. Without
-it, `record`, `hotkey` and `tray` capture the
-primary monitor by default. Pick another with `-m 2` (numbers from
+click a screen to record all of it, or drag out an area (Esc cancels). A bar under the
+selection sets the format (GIF/MP4), size (Small 640px @ 10 fps, Medium 960px @
+12 fps, Large 1280px @ 15 fps), click rings and zoom, and shows where the file
+will be saved; Record starts a 3-second countdown (`--countdown 0` skips it).
+While recording, a red frame marks the area with a Stop button under it; both
+are hidden from the recording itself (Windows 10 2004 or later).
+
+Without `--select`, `record`, `hotkey` and `tray` capture the primary monitor
+by default. Pick another with `-m 2` (numbers from
 `bv monitors`, left to right) or record everything with `-m all`. `--region`
 offsets may be negative for screens left of or above the primary one, e.g.
 `--region 1920x1080-1920+0`.
