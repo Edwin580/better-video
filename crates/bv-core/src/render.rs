@@ -45,8 +45,87 @@ pub fn crop_scale_rgba(src: &[u8], src_size: Size, view: Rect, dst: &mut [u8], d
     }
 }
 
+/// Like [`crop_scale_rgba`], but when shrinking by 2× or more it samples at
+/// a multiple of the output size and box-averages down, so small text stays
+/// legible instead of aliasing. `scratch` is reused between calls.
+pub fn crop_scale_rgba_smooth(
+    src: &[u8],
+    src_size: Size,
+    view: Rect,
+    dst: &mut [u8],
+    dst_size: Size,
+    scratch: &mut Vec<u8>,
+) {
+    let k = ((view.width / dst_size.width as f64).floor() as u32).clamp(1, 4);
+    if k == 1 {
+        if view == Rect::full(src_size) && dst_size == src_size {
+            return dst.copy_from_slice(src);
+        }
+        return crop_scale_rgba(src, src_size, view, dst, dst_size);
+    }
+    let big = Size::new(dst_size.width * k, dst_size.height * k);
+    // Whole frame at an exact integer ratio (1920→960, 1920→640): the
+    // bilinear pass would be an identity copy, so average straight away.
+    if view == Rect::full(src_size) && big == src_size {
+        return box_reduce(src, src_size, k as usize, dst, dst_size);
+    }
+    scratch.resize(big.width as usize * big.height as usize * 4, 0);
+    crop_scale_rgba(src, src_size, view, scratch, big);
+    box_reduce(scratch, big, k as usize, dst, dst_size);
+}
+
+/// Average each `k×k` block of `src` into one pixel of `dst`.
+fn box_reduce(src: &[u8], src_size: Size, k: usize, dst: &mut [u8], dst_size: Size) {
+    let (sw, dw) = (src_size.width as usize, dst_size.width as usize);
+    let area = (k * k) as u32;
+    let mut sums = vec![0u32; dw * 4];
+    for (y, row) in dst.chunks_exact_mut(dw * 4).enumerate() {
+        sums.fill(0);
+        for sy in y * k..(y + 1) * k {
+            let line = &src[sy * sw * 4..(sy + 1) * sw * 4];
+            for (x, s) in sums.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                for px in line[x * k * 4..(x + 1) * k * 4].as_chunks::<4>().0 {
+                    for c in 0..4 {
+                        s[c] += px[c] as u32;
+                    }
+                }
+            }
+        }
+        for (o, s) in row.iter_mut().zip(&sums) {
+            *o = ((s + area / 2) / area) as u8;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn smooth_downscale_averages() {
+        // 4x2 checkerboard of black/white columns shrinks to mid grey.
+        let src_size = Size::new(4, 2);
+        let src: Vec<u8> = (0..8)
+            .flat_map(|i| {
+                let v = if i % 2 == 0 { 0 } else { 255 };
+                [v, v, v, 255]
+            })
+            .collect();
+        let out = Size::new(2, 1);
+        let mut dst = vec![0; 8];
+        let mut scratch = Vec::new();
+        crop_scale_rgba_smooth(
+            &src,
+            src_size,
+            Rect::full(src_size),
+            &mut dst,
+            out,
+            &mut scratch,
+        );
+        for px in dst.chunks(4) {
+            assert!((px[0] as i32 - 128).abs() <= 1, "{dst:?}");
+            assert_eq!(px[3], 255);
+        }
+    }
+
     use super::*;
 
     #[test]

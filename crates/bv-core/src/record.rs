@@ -10,6 +10,8 @@ use std::{
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use bv_engine::capture::Area;
+
 use crate::ffmpeg::{self, Platform};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,18 +59,48 @@ impl std::fmt::Display for CaptureRegion {
     }
 }
 
+/// What grabs the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Engine {
+    /// bv-engine: GDI capture into a `.bvraw` (Windows only). GIF export
+    /// needs no ffmpeg at all.
+    Native,
+    /// ffmpeg's platform grabber into an `.mkv`.
+    Ffmpeg,
+}
+
+impl Engine {
+    /// Native where it's implemented, ffmpeg elsewhere.
+    pub fn default_for_platform() -> Self {
+        if cfg!(windows) {
+            Engine::Native
+        } else {
+            Engine::Ffmpeg
+        }
+    }
+
+    /// Extension of the intermediate recording.
+    pub fn raw_extension(self) -> &'static str {
+        match self {
+            Engine::Native => bv_engine::raw::EXTENSION,
+            Engine::Ffmpeg => "mkv",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RecordOptions {
     pub output: PathBuf,
     pub fps: u32,
     pub region: Option<CaptureRegion>,
     /// Platform-specific screen id: X11 display (`:0`), avfoundation device
-    /// name, or gdigrab target. `None` picks the main screen.
+    /// name, or gdigrab target. `None` picks the main screen. ffmpeg only.
     pub display: Option<String>,
     /// Stop automatically after this long.
     pub max_duration: Option<Duration>,
     /// Burn the OS cursor into the video.
     pub draw_cursor: bool,
+    pub engine: Engine,
 }
 
 impl RecordOptions {
@@ -80,17 +112,23 @@ impl RecordOptions {
             display: None,
             max_duration: None,
             draw_cursor: true,
+            engine: Engine::default_for_platform(),
         }
     }
 }
 
 /// A running recording. Call [`Recording::stop`] to finalize the file.
 pub struct Recording {
-    child: Child,
+    backend: Backend,
     started: Instant,
     started_wall: SystemTime,
     max_duration: Option<Duration>,
     output: PathBuf,
+}
+
+enum Backend {
+    Ffmpeg(Child),
+    Native(bv_engine::Recorder),
 }
 
 /// A finished recording.
@@ -105,36 +143,32 @@ pub struct Recorded {
 
 impl Recording {
     pub fn start(opts: &RecordOptions) -> Result<Self> {
-        let platform = Platform::current();
-        let mut cmd = std::process::Command::new(ffmpeg::ffmpeg_bin());
-        // stdin stays open: writing "q" is ffmpeg's graceful stop.
-        // Stamp frames with wall-clock time and keep those timestamps in the
-        // file, so we can tell exactly when the first frame was grabbed.
-        cmd.args(["-hide_banner", "-loglevel", "error", "-y"])
-            .args(["-use_wallclock_as_timestamps", "1"])
-            .args(ffmpeg::capture_input_args(platform, opts))
-            .arg("-copyts");
-        cmd.args(["-vf", &ffmpeg::capture_filter(platform, opts)])
-            // Fast, visually lossless intermediate; the export step makes it small.
-            .args([
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-crf",
-                "16",
-                "-pix_fmt",
-                "yuv420p",
-            ])
-            .arg(&opts.output)
-            .stdin(Stdio::piped());
-
         let (started, started_wall) = (Instant::now(), SystemTime::now());
-        let child = cmd
-            .spawn()
-            .context("starting ffmpeg (is it installed and on PATH?)")?;
+        let backend = match opts.engine {
+            Engine::Ffmpeg => Backend::Ffmpeg(start_ffmpeg(opts)?),
+            Engine::Native => {
+                let area = match opts.region {
+                    Some(r) => Area {
+                        x: r.x,
+                        y: r.y,
+                        width: r.width,
+                        height: r.height,
+                    },
+                    None => bv_engine::capture::virtual_screen(),
+                };
+                let rec = bv_engine::Recorder::start(
+                    opts.output.clone(),
+                    area,
+                    opts.fps,
+                    opts.draw_cursor,
+                    started,
+                )
+                .context("starting screen capture")?;
+                Backend::Native(rec)
+            }
+        };
         Ok(Self {
-            child,
+            backend,
             started,
             started_wall,
             // Enforced here rather than with ffmpeg's `-t`, which counts from
@@ -144,7 +178,7 @@ impl Recording {
         })
     }
 
-    /// When ffmpeg was launched; use as the origin for cursor timestamps.
+    /// When capture was launched; use as the origin for cursor timestamps.
     pub fn started(&self) -> Instant {
         self.started
     }
@@ -157,37 +191,75 @@ impl Recording {
         &self.output
     }
 
-    /// True once `max_duration` has passed or ffmpeg exited by itself.
+    /// True once `max_duration` has passed or capture stopped by itself.
     pub fn finished(&mut self) -> bool {
         self.max_duration.is_some_and(|d| self.elapsed() >= d)
-            || matches!(self.child.try_wait(), Ok(Some(_)))
+            || match &mut self.backend {
+                Backend::Ffmpeg(child) => matches!(child.try_wait(), Ok(Some(_))),
+                Backend::Native(rec) => rec.is_finished(),
+            }
     }
 
-    /// Ask ffmpeg to finish writing and wait for it.
-    pub fn stop(mut self) -> Result<Recorded> {
-        if let Some(stdin) = self.child.stdin.as_mut() {
-            // Ignore errors: ffmpeg may already have exited.
-            let _ = stdin.write_all(b"q");
-            let _ = stdin.flush();
-        }
-        let status = self.child.wait().context("waiting for ffmpeg")?;
-        // ffmpeg exits 255 when interrupted by SIGINT (Ctrl+C) but still
-        // finalizes the file, so trust the output if it exists.
-        if !status.success() && !self.output.exists() {
-            bail!("ffmpeg recording failed ({status})");
-        }
-        let launched = self
-            .started_wall
-            .duration_since(UNIX_EPOCH)
-            .map_or(0.0, |d| d.as_secs_f64());
-        let first_frame_delay = ffmpeg::probe(&self.output)
-            .map(|info| first_frame_delay(launched, info.start_time))
-            .unwrap_or(0.0);
+    /// Finish writing the recording and wait for it.
+    pub fn stop(self) -> Result<Recorded> {
+        let first_frame_delay = match self.backend {
+            Backend::Native(rec) => rec.stop().context("screen capture failed")?.first_frame,
+            Backend::Ffmpeg(child) => stop_ffmpeg(child, &self.output, self.started_wall)?,
+        };
         Ok(Recorded {
             path: self.output,
             first_frame_delay,
         })
     }
+}
+
+fn start_ffmpeg(opts: &RecordOptions) -> Result<Child> {
+    let platform = Platform::current();
+    let mut cmd = std::process::Command::new(ffmpeg::ffmpeg_bin());
+    // stdin stays open: writing "q" is ffmpeg's graceful stop.
+    // Stamp frames with wall-clock time and keep those timestamps in the
+    // file, so we can tell exactly when the first frame was grabbed.
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args(["-use_wallclock_as_timestamps", "1"])
+        .args(ffmpeg::capture_input_args(platform, opts))
+        .arg("-copyts");
+    cmd.args(["-vf", &ffmpeg::capture_filter(platform, opts)])
+        // Fast, visually lossless intermediate; the export step makes it small.
+        .args([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "16",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&opts.output)
+        .stdin(Stdio::piped());
+    cmd.spawn()
+        .context("starting ffmpeg (is it installed and on PATH?)")
+}
+
+/// Ask ffmpeg to finish writing; returns the first-frame delay.
+fn stop_ffmpeg(mut child: Child, output: &Path, started_wall: SystemTime) -> Result<f64> {
+    if let Some(stdin) = child.stdin.as_mut() {
+        // Ignore errors: ffmpeg may already have exited.
+        let _ = stdin.write_all(b"q");
+        let _ = stdin.flush();
+    }
+    let status = child.wait().context("waiting for ffmpeg")?;
+    // ffmpeg exits 255 when interrupted by SIGINT (Ctrl+C) but still
+    // finalizes the file, so trust the output if it exists.
+    if !status.success() && !output.exists() {
+        bail!("ffmpeg recording failed ({status})");
+    }
+    let launched = started_wall
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    Ok(ffmpeg::probe(output)
+        .map(|info| first_frame_delay(launched, info.start_time))
+        .unwrap_or(0.0))
 }
 
 /// Delay between launching ffmpeg and its first frame, given both as Unix

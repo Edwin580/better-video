@@ -18,7 +18,8 @@ bv tray                   # same, from a menu bar / tray icon
 ## Install (from source)
 
 Requirements: Rust (stable) and [`ffmpeg`](https://ffmpeg.org/download.html) on
-your `PATH` (or point `BV_FFMPEG` / `BV_FFPROBE` at it). On Linux, cursor zoom
+your `PATH` (or point `BV_FFMPEG` / `BV_FFPROBE` at it). On Windows, ffmpeg is
+only needed for MP4/WebM: GIFs use the built-in engine. On Linux, cursor zoom
 needs X11 headers (`libx11-dev`), and `--copy` needs `xclip` (X11) or
 `wl-clipboard` (Wayland). The menu bar app on Linux needs `libgtk-3-dev`,
 `libayatana-appindicator3-dev` and `libxdo-dev`.
@@ -56,19 +57,39 @@ autoplay without a player matters. For GIFs, lower `--fps` and `--width` first.
 
 ## How it works
 
-Recording and exporting are separate so recording stays cheap:
+Recording and exporting are separate so recording stays cheap. There are two
+engines; Windows uses the native one by default (`--engine ffmpeg` switches).
+
+**Native engine** (`bv-engine`, Windows, no ffmpeg needed for GIF):
+
+1. **Record** — GDI grabs the region (cursor included) at the export frame
+   rate. Each frame is split into 32×32 tiles and only the tiles that changed
+   are written, LZ4-compressed, to a `.bvraw` file, so an idle screen costs
+   almost nothing.
+2. **Export** — frames are replayed at the output frame rate; unchanged ones
+   aren't re-rendered. Downscaling box-averages so text stays readable. For
+   GIF, a first pass collects colours (an exact palette when the clip uses at
+   most 255, median cut otherwise) and a second pass encodes with a built-in
+   LZW coder: each frame stores only the rectangle that changed, unchanged
+   pixels in it are transparent, and identical frames merge into one.
+   MP4/WebM frames are piped to ffmpeg.
+
+**ffmpeg engine** (Linux, macOS, or `--engine ffmpeg`):
 
 1. **Record** — ffmpeg grabs the screen (`x11grab` / `avfoundation` / `gdigrab`)
-   into a fast, visually lossless `.mkv`. A background thread samples the
-   cursor at ~120 Hz into a JSON track.
+   into a fast, visually lossless `.mkv`.
 2. **Export** — without zoom, a single ffmpeg pass scales and encodes (GIF uses
    a one-pass `palettegen`/`paletteuse` tuned for screen content). With zoom,
-   ffmpeg decodes to raw RGBA, `ZoomPlanner` picks a viewport per frame (eased,
-   frame-rate independent, clamped to the screen), `render::crop_scale_rgba`
-   crops + scales in one pass, and a second ffmpeg encodes.
+   ffmpeg decodes to raw RGBA, frames are rendered as below, and a second
+   ffmpeg encodes.
+
+Either way a background thread samples the cursor at ~120 Hz into a JSON
+track, `ZoomPlanner` picks a viewport per frame (eased, frame-rate
+independent, clamped to the screen), and `render` crops + scales in one pass.
 
 ```
 crates/
+  bv-engine/ # native engine: GDI capture, .bvraw, palette, LZW, GIF writer
   bv-core/   # library: record, cursor track, zoom planner, renderer, export
   bv-cli/    # `bv` binary + platform cursor tracker
 ```
@@ -88,8 +109,9 @@ clipboard.
       runs per-monitor DPI aware, so everything is in physical pixels)
 - [x] Record one monitor at a time on Windows (`--monitor`)
 - [ ] Wayland capture (xdg-desktop-portal + PipeWire)
-- [ ] Native capture backends (ScreenCaptureKit, DXGI) to drop the ffmpeg
-      runtime dependency, or ship ffmpeg as a sidecar
+- [x] Native capture + GIF encoder on Windows (`bv-engine`), no ffmpeg needed
+- [ ] Native capture on macOS (ScreenCaptureKit) and Linux; DXGI desktop
+      duplication on Windows for high frame rates
 - [ ] Optional [gifski](https://gif.ski) encoder for higher-quality GIFs
 - [x] Click highlight rings
 - [ ] Keystroke overlay

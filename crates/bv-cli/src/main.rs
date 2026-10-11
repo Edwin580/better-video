@@ -17,7 +17,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use bv_core::{
-    export, ffmpeg, monitor, zoom::ZoomTrigger, CaptureRegion, CursorTrack, ExportOptions,
+    export, ffmpeg, monitor, zoom::ZoomTrigger, CaptureRegion, CursorTrack, Engine, ExportOptions,
     MonitorChoice, OutputFormat, RecordOptions, Recording, ZoomConfig,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -86,15 +86,21 @@ struct CaptureArgs {
     /// [default on Windows: primary].
     #[arg(long, short = 'm')]
     monitor: Option<MonitorChoice>,
-    /// Screen to capture (X11 display, avfoundation device or gdigrab target).
+    /// Screen to capture with the ffmpeg engine (X11 display, avfoundation
+    /// device or gdigrab target).
     #[arg(long)]
     display: Option<String>,
     /// Stop automatically after this many seconds.
     #[arg(long, short = 'd')]
     duration: Option<f64>,
-    /// Capture frame rate.
-    #[arg(long, default_value_t = 30)]
-    capture_fps: u32,
+    /// Capture frame rate [default: the export frame rate with the native
+    /// engine, 30 with ffmpeg].
+    #[arg(long)]
+    capture_fps: Option<u32>,
+    /// What captures the screen: `native` (built in, Windows only; GIFs
+    /// need no ffmpeg) or `ffmpeg` [default: native on Windows].
+    #[arg(long, value_enum)]
+    engine: Option<EngineArg>,
     /// Keep the raw recording + cursor track next to the output so you can
     /// re-run `bv export` later.
     #[arg(long)]
@@ -155,6 +161,12 @@ struct ExportArgs {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum EngineArg {
+    Native,
+    Ffmpeg,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Format {
     Gif,
     Mp4,
@@ -192,6 +204,10 @@ impl ExportArgs {
             },
             ..ZoomConfig::default()
         })
+    }
+
+    fn fps(&self, format: OutputFormat) -> u32 {
+        self.fps.unwrap_or(ExportOptions::new("", "", format).fps)
     }
 
     fn needs_cursor(&self) -> bool {
@@ -242,6 +258,25 @@ impl CaptureArgs {
         choice
             .region(&monitor::monitors())
             .map_err(anyhow::Error::msg)
+    }
+
+    fn engine(&self) -> Engine {
+        match self.engine {
+            Some(EngineArg::Native) => Engine::Native,
+            Some(EngineArg::Ffmpeg) => Engine::Ffmpeg,
+            // --display names an ffmpeg device.
+            None if self.display.is_some() => Engine::Ffmpeg,
+            None => Engine::default_for_platform(),
+        }
+    }
+
+    /// Native capture only needs as many frames as the export keeps;
+    /// ffmpeg's intermediate may be re-exported at any rate.
+    fn capture_fps(&self, engine: Engine, format: OutputFormat) -> u32 {
+        self.capture_fps.unwrap_or(match engine {
+            Engine::Native => self.export.fps(format),
+            Engine::Ffmpeg => 30,
+        })
     }
 }
 
@@ -328,24 +363,27 @@ struct Session {
 
 impl Session {
     fn start(args: &CaptureArgs, output: PathBuf, format: OutputFormat) -> Result<Self> {
+        let engine = args.engine();
+        let raw_ext = format!("raw.{}", engine.raw_extension());
         let raw = if args.keep_raw {
-            output.with_extension("raw.mkv")
+            output.with_extension(&raw_ext)
         } else {
             let dir = std::env::temp_dir().join("better-video");
             std::fs::create_dir_all(&dir)?;
             dir.join(
                 output
-                    .with_extension("raw.mkv")
+                    .with_extension(&raw_ext)
                     .file_name()
                     .context("bad output path")?,
             )
         };
         let region = args.capture_region()?;
         let opts = RecordOptions {
-            fps: args.capture_fps,
+            fps: args.capture_fps(engine, format),
             region,
             display: args.display.clone(),
             max_duration: args.duration.map(Duration::from_secs_f64),
+            engine,
             ..RecordOptions::new(&raw)
         };
 
@@ -422,8 +460,13 @@ fn export_cmd(args: ExportCmd) -> Result<()> {
 }
 
 fn doctor() -> Result<()> {
+    let native = Engine::default_for_platform() == Engine::Native;
+    if native {
+        println!("✓ native engine: built-in screen capture and GIF encoder");
+    }
     match ffmpeg::version() {
         Some(v) => println!("✓ {v}"),
+        None if native => println!("- ffmpeg not found — only needed for MP4/WebM"),
         None => println!("✗ ffmpeg not found — install it or set BV_FFMPEG"),
     }
     let cursor = CursorTracker::start(Instant::now(), None).map(CursorTracker::finish);

@@ -25,6 +25,12 @@ impl ClickRings {
         Self { clicks }
     }
 
+    /// Whether any ring is visible at time `t`.
+    pub fn active_at(&self, t: f64) -> bool {
+        let first = self.clicks.partition_point(|c| c.0 < t - RING_SECS);
+        self.clicks.get(first).is_some_and(|c| c.0 <= t)
+    }
+
     /// Draw the rings active at time `t` onto `frame` (RGBA, `size`), which
     /// shows the source region `view`.
     pub fn draw(&self, frame: &mut [u8], size: Size, view: Rect, t: f64) {

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/bv-core", "crates/bv-cli"]
+members = ["crates/bv-engine", "crates/bv-core", "crates/bv-cli"]
 
 [workspace.package]
 version = "0.1.0"
