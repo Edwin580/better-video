@@ -1,0 +1,22 @@
+[package]
+name = "bv-cli"
+description = "better-video: record your screen, export a small GIF/MP4 for PRs"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "bv"
+path = "src/main.rs"
+
+[features]
+default = ["cursor"]
+# Global cursor tracking (needed for --zoom). Requires X11 libs on Linux.
+cursor = ["dep:device_query"]
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+bv-core = { path = "../bv-core" }
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"
+device_query = { version = "2", optional = true }
