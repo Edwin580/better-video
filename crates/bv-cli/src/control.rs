@@ -30,7 +30,10 @@ pub struct Active {
 
 impl Active {
     pub fn register(output: &Path) -> Result<Self> {
-        let dir = dir();
+        Self::register_in(dir(), output)
+    }
+
+    fn register_in(dir: PathBuf, output: &Path) -> Result<Self> {
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         let pid = std::process::id();
         let me = Self { dir, pid };
@@ -64,8 +67,11 @@ impl Drop for Active {
 /// Ask every running recording to stop, wait for them to export, and
 /// return their results.
 pub fn stop_all(timeout: Duration) -> Result<Vec<Value>> {
-    let dir = dir();
-    let Ok(entries) = fs::read_dir(&dir) else {
+    stop_all_in(&dir(), timeout)
+}
+
+fn stop_all_in(dir: &Path, timeout: Duration) -> Result<Vec<Value>> {
+    let Ok(entries) = fs::read_dir(dir) else {
         return Ok(Vec::new());
     };
     let mut pids = Vec::new();
@@ -129,32 +135,59 @@ fn alive(pid: u32) -> bool {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn alive(pid: u32) -> bool {
-    // Linux has /proc; elsewhere assume it's alive (the wait has a timeout).
-    let proc = Path::new("/proc");
-    !proc.exists() || proc.join(pid.to_string()).exists()
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // Signal 0 checks the process exists without touching it; EPERM means
+    // it exists but belongs to someone else.
+    let found = unsafe { libc::kill(pid, 0) } == 0;
+    found || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn alive(_pid: u32) -> bool {
+    // Unknown platform: assume it's alive (the wait has a timeout).
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A folder of its own per test, so parallel tests (and real
+    /// recordings) don't see each other's entries.
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join("better-video-test")
+            .join(format!("{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn stale_registrations_are_cleared() {
         // A pid that can't be running.
-        let dir = dir();
-        fs::create_dir_all(&dir).unwrap();
+        let dir = test_dir("stale");
         let stale = dir.join("4294967290.json");
         fs::write(&stale, "{}").unwrap();
-        let results = stop_all(Duration::from_millis(10)).unwrap();
+        let results = stop_all_in(&dir, Duration::from_millis(10)).unwrap();
         assert!(!stale.exists());
-        assert!(results.iter().all(|r| r["pid"] != 4294967290u32));
+        assert!(results.is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn this_process_is_alive() {
+        assert!(alive(std::process::id()));
     }
 
     #[test]
     fn registration_round_trip() {
-        let me = Active::register(Path::new("clip.gif")).unwrap();
+        let dir = test_dir("round-trip");
+        let me = Active::register_in(dir.clone(), Path::new("clip.gif")).unwrap();
         assert!(me.file("json").exists());
         assert!(!me.stop_requested());
         fs::write(me.file("stop"), b"").unwrap();
@@ -164,6 +197,6 @@ mod tests {
         me.done(&json!({ "path": "clip.gif" }));
         assert!(!json.exists());
         assert!(result.exists());
-        fs::remove_file(result).unwrap();
+        fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -117,6 +117,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "device_query",
+ "libc",
  "serde",
  "serde_json",
  "tao",
