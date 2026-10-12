@@ -25,6 +25,41 @@ struct Bin {
     r: u64,
     g: u64,
     b: u64,
+    /// The bin's most common exact colour, by a weighted majority vote
+    /// over runs, and its remaining vote margin.
+    top: u32,
+    margin: u64,
+}
+
+impl Bin {
+    /// Count a run of `len` pixels of colour `c`.
+    fn add_run(&mut self, c: u32, len: u64) {
+        let [r, g, b] = unpack(c);
+        self.n += len;
+        self.s += 1;
+        self.r += r as u64;
+        self.g += g as u64;
+        self.b += b as u64;
+        if c == self.top {
+            self.margin += len;
+        } else if self.margin >= len {
+            self.margin -= len;
+        } else {
+            self.top = c;
+            self.margin = len - self.margin;
+        }
+    }
+
+    /// Its colour: the exact one when more than half its pixels share it
+    /// (a flat background, black text), otherwise the mean of its runs.
+    fn color(&self) -> [f64; 3] {
+        // The margin never exceeds the winner's own count.
+        if self.margin * 2 > self.n {
+            return unpack(self.top).map(f64::from);
+        }
+        let s = self.s.max(1) as f64;
+        [self.r as f64 / s, self.g as f64 / s, self.b as f64 / s]
+    }
 }
 
 /// Collects colour statistics from RGBA frames.
@@ -49,27 +84,31 @@ impl PaletteBuilder {
 
     /// Count the pixels of one RGBA frame.
     pub fn add(&mut self, rgba: &[u8]) {
-        let mut last = u32::MAX;
-        for px in rgba.as_chunks::<4>().0.iter() {
+        let pixels = rgba.as_chunks::<4>().0;
+        let Some(first) = pixels.first() else {
+            return;
+        };
+        // Runs of one colour are common; counting them once per run keeps
+        // the histogram cheap.
+        let (mut run, mut len) = (rgb(first), 0u64);
+        for px in pixels {
             let c = rgb(px);
-            // Runs of one colour are common; counting them once per run
-            // keeps the histogram cheap without skewing it much.
-            if c == last {
-                self.hist[hist_index(px)].n += 1;
+            if c == run {
+                len += 1;
                 continue;
             }
-            last = c;
-            let bin = &mut self.hist[hist_index(px)];
-            bin.n += 1;
-            bin.s += 1;
-            bin.r += px[0] as u64;
-            bin.g += px[1] as u64;
-            bin.b += px[2] as u64;
-            if let Some(set) = &mut self.exact {
-                set.insert(c);
-                if set.len() > MAX_COLORS {
-                    self.exact = None;
-                }
+            self.add_run(run, len);
+            (run, len) = (c, 1);
+        }
+        self.add_run(run, len);
+    }
+
+    fn add_run(&mut self, c: u32, len: u64) {
+        self.hist[hist_index(&unpack(c))].add_run(c, len);
+        if let Some(set) = &mut self.exact {
+            set.insert(c);
+            if set.len() > MAX_COLORS {
+                self.exact = None;
             }
         }
     }
@@ -221,12 +260,9 @@ fn median_cut(hist: &[Bin], max: usize) -> Vec<[u8; 3]> {
     let entries: Vec<Entry> = hist
         .iter()
         .filter(|b| b.n > 0)
-        .map(|b| {
-            let s = b.s.max(1) as f64;
-            Entry {
-                c: [b.r as f64 / s, b.g as f64 / s, b.b as f64 / s],
-                n: b.n as f64,
-            }
+        .map(|b| Entry {
+            c: b.color(),
+            n: b.n as f64,
         })
         .collect();
     if entries.is_empty() {
@@ -352,5 +388,21 @@ mod tests {
             .unwrap();
         assert!(worst <= 24, "worst channel error {worst}");
         assert!(idx.iter().all(|&i| i != TRANSPARENT));
+    }
+
+    #[test]
+    fn a_dominant_colour_is_kept_exactly() {
+        // A big black area with a few near-black anti-aliasing pixels in the
+        // same histogram bin, plus enough other colours to need median cut.
+        let mut colors: Vec<[u8; 3]> = vec![[0, 0, 0]; 5000];
+        for i in 0..300 {
+            colors[i * 16] = [(i % 7) as u8, (i % 5) as u8, (i % 6) as u8];
+        }
+        colors.extend((0..4096).map(|i| [(i % 64 * 4) as u8, (i / 64 * 4) as u8, 200]));
+        let mut b = PaletteBuilder::new();
+        b.add(&frame(&colors));
+        let p = b.build();
+        assert!(!p.is_lossless());
+        assert!(p.colors().contains(&[0, 0, 0]), "{:?}", &p.colors()[..8]);
     }
 }
