@@ -284,7 +284,10 @@ and export time went.
 **ffmpeg engine** (Linux, macOS, or `--engine ffmpeg`):
 
 1. **Record** — ffmpeg grabs the screen (`x11grab` / `avfoundation` / `gdigrab`)
-   into a fast, visually lossless `.mkv`.
+   into a fast, visually lossless `.mkv`, at the export frame rate (15 fps
+   for a GIF, which halves the grabber's CPU compared with 30). With
+   `--keep-raw` it captures at least 30 fps so the take can be re-exported
+   at any rate; `--capture-fps` overrides both.
 2. **Export** — GIFs: ffmpeg decodes the `.mkv` at the output frame rate into
    a temporary `.bvraw` (only changed tiles are kept, so it's small), and the
    native exporter above takes it from there: partial redraws, the built-in
