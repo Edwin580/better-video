@@ -96,6 +96,9 @@ struct ExportArgs {
     /// Stay zoomed in and follow the cursor the whole time.
     #[arg(long)]
     zoom_follow: bool,
+    /// Draw a ring wherever you click.
+    #[arg(long)]
+    clicks: bool,
     /// Zoom magnification.
     #[arg(long, default_value_t = 2.0)]
     zoom_level: f64,
@@ -147,6 +150,10 @@ impl ExportArgs {
         })
     }
 
+    fn needs_cursor(&self) -> bool {
+        self.zoom().is_some() || self.clicks
+    }
+
     fn options(&self, input: PathBuf, output: PathBuf, format: OutputFormat) -> ExportOptions {
         let mut opts = ExportOptions::new(input, output, format);
         opts.width = Some(self.width);
@@ -154,6 +161,7 @@ impl ExportArgs {
             opts.fps = fps;
         }
         opts.zoom = self.zoom();
+        opts.click_rings = self.clicks;
         opts.trim_start = self.trim_start;
         opts.trim_end = self.trim_end;
         opts
@@ -197,10 +205,10 @@ fn record(args: RecordArgs) -> Result<()> {
 
     let stop = stop_signal()?;
     let recording = Recording::start(&opts)?;
-    let tracker = if args.export.zoom().is_some() {
+    let tracker = if args.export.needs_cursor() {
         let t = CursorTracker::start(recording.started(), args.region);
         if t.is_none() {
-            eprintln!("warning: cursor tracking unavailable; exporting without zoom");
+            eprintln!("warning: cursor tracking unavailable; exporting without zoom/clicks");
         }
         t
     } else {
@@ -245,13 +253,13 @@ fn export_cmd(args: ExportCmd) -> Result<()> {
         stem.with_extension("").with_extension(format.extension())
     });
     let mut opts = args.export.options(args.input.clone(), output, format);
-    if opts.zoom.is_some() {
+    if args.export.needs_cursor() {
         let path = args
             .cursor
             .clone()
             .unwrap_or_else(|| cursor_sidecar(&args.input));
         opts.cursor = Some(CursorTrack::load(&path).with_context(|| {
-            "zoom needs a cursor track; pass --cursor or record with --keep-raw"
+            "zoom/clicks need a cursor track; pass --cursor or record with --keep-raw"
         })?);
     }
     report(&export(&opts)?);

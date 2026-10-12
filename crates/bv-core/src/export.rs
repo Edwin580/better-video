@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     cursor::CursorTrack,
     ffmpeg,
-    geometry::Size,
+    geometry::{Rect, Size},
+    overlay::ClickRings,
     render::crop_scale_rgba,
     zoom::{ZoomConfig, ZoomPlanner},
 };
@@ -97,6 +98,8 @@ pub struct ExportOptions {
     pub width: Option<u32>,
     /// Cursor-following zoom; needs `cursor`.
     pub zoom: Option<ZoomConfig>,
+    /// Draw a ring where each click happened; needs `cursor`.
+    pub click_rings: bool,
     pub cursor: Option<CursorTrack>,
     /// Seconds to cut from the start of the recording.
     pub trim_start: f64,
@@ -118,6 +121,7 @@ impl ExportOptions {
             fps,
             width: Some(1280),
             zoom: None,
+            click_rings: false,
             cursor: None,
             trim_start: 0.0,
             trim_end: 0.0,
@@ -130,11 +134,12 @@ pub fn export(opts: &ExportOptions) -> Result<PathBuf> {
     let out_size = info.size.fit_width(opts.width.unwrap_or(info.size.width));
     let input = input_args(opts, info.duration)?;
 
-    match (&opts.zoom, &opts.cursor) {
-        (Some(zoom), Some(track)) if !track.is_empty() => {
+    let wants_cursor = opts.zoom.is_some() || opts.click_rings;
+    match &opts.cursor {
+        Some(track) if wants_cursor && !track.is_empty() => {
             let mut track = track.clone();
             track.shift_earlier(opts.trim_start);
-            export_zoomed(opts, &input, *zoom, &track, info.size, out_size)?
+            export_rendered(opts, &input, &track, info.size, out_size)?
         }
         _ => export_plain(opts, &input, out_size)?,
     }
@@ -195,12 +200,12 @@ fn export_plain(opts: &ExportOptions, input: &[String], out: Size) -> Result<()>
     Ok(())
 }
 
-/// Zoom: ffmpeg decodes to raw RGBA, we pick a viewport per frame and
-/// crop/scale it, then pipe the result into a second ffmpeg to encode.
-fn export_zoomed(
+/// Zoom / click rings: ffmpeg decodes to raw RGBA, we pick a viewport per
+/// frame, crop/scale it and draw overlays, then pipe the result into a
+/// second ffmpeg to encode.
+fn export_rendered(
     opts: &ExportOptions,
     input: &[String],
-    zoom: ZoomConfig,
     track: &CursorTrack,
     src: Size,
     out: Size,
@@ -225,7 +230,7 @@ fn export_zoomed(
         .spawn()
         .context("starting ffmpeg encoder")?;
 
-    let result = pump_frames(&mut decoder, &mut encoder, opts.fps, zoom, track, src, out);
+    let result = pump_frames(&mut decoder, &mut encoder, opts, track, src, out);
     // Close the encoder's stdin so it can finish, even on error.
     drop(encoder.stdin.take());
     let enc_status = encoder.wait()?;
@@ -243,22 +248,26 @@ fn export_zoomed(
 fn pump_frames(
     decoder: &mut Child,
     encoder: &mut Child,
-    fps: u32,
-    zoom: ZoomConfig,
+    opts: &ExportOptions,
     track: &CursorTrack,
     src: Size,
     out: Size,
 ) -> Result<()> {
     let mut reader = decoder.stdout.take().context("decoder stdout")?;
     let mut writer = BufWriter::new(encoder.stdin.take().context("encoder stdin")?);
-    let mut planner = ZoomPlanner::new(zoom, track, src);
+    let mut planner = opts.zoom.map(|z| ZoomPlanner::new(z, track, src));
+    let rings = opts.click_rings.then(|| ClickRings::new(track));
 
     let mut frame = vec![0u8; src.width as usize * src.height as usize * 4];
     let mut scaled = vec![0u8; out.width as usize * out.height as usize * 4];
     let mut index: u64 = 0;
     while read_frame(&mut reader, &mut frame)? {
-        let view = planner.next(index as f64 / fps as f64);
+        let t = index as f64 / opts.fps as f64;
+        let view = planner.as_mut().map_or(Rect::full(src), |p| p.next(t));
         crop_scale_rgba(&frame, src, view, &mut scaled, out);
+        if let Some(rings) = &rings {
+            rings.draw(&mut scaled, out, view, t);
+        }
         writer
             .write_all(&scaled)
             .context("writing to ffmpeg encoder")?;
