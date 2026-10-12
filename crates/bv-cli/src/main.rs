@@ -1155,6 +1155,63 @@ mod tests {
         assert_eq!(name.len(), "bv-2026-10-11_15-48-12.gif".len());
     }
 
+    /// Every `--flag` the skill and the README mention must exist, so the
+    /// docs can't drift from the CLI (e.g. after a flag is renamed).
+    #[test]
+    fn documented_flags_exist() {
+        use clap::CommandFactory;
+        fn collect(cmd: &clap::Command, flags: &mut std::collections::HashSet<String>) {
+            flags.extend(
+                cmd.get_arguments()
+                    .filter_map(|a| a.get_long())
+                    .map(String::from),
+            );
+            for sub in cmd.get_subcommands() {
+                collect(sub, flags);
+            }
+        }
+        let mut flags =
+            std::collections::HashSet::from(["help".to_string(), "version".to_string()]);
+        collect(&Cli::command(), &mut flags);
+        // Flags of other tools the docs show (cargo, gh, git, xdotool, Chromium).
+        const OTHER_TOOLS: &[&str] = &[
+            "path",
+            "features",
+            "attach",
+            "body-file",
+            "title",
+            "detach",
+            "orphan",
+            "shell",
+            "name",
+            "delay",
+            "app",
+            "window-size",
+            "window-position",
+            "user-data-dir",
+            "no-first-run",
+        ];
+        for (doc, text) in [
+            ("SKILL.md", SKILL),
+            ("README.md", include_str!("../../../README.md")),
+        ] {
+            for (i, _) in text.match_indices("--") {
+                let rest = &text[i + 2..];
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
+                    .unwrap_or(rest.len());
+                let flag = rest[..end].trim_end_matches('-');
+                if flag.is_empty() || text[..i].ends_with('-') {
+                    continue;
+                }
+                assert!(
+                    flags.contains(flag) || OTHER_TOOLS.contains(&flag),
+                    "{doc} mentions --{flag}, which bv doesn't have (add other tools' flags to OTHER_TOOLS)"
+                );
+            }
+        }
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn civil_dates() {
