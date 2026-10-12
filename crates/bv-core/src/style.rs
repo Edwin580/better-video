@@ -261,7 +261,7 @@ impl Frame {
     /// background is still identical in every frame.
     pub fn dither(&mut self, step: f64) {
         let w = self.layout.canvas.width as usize;
-        for (i, px) in self.base.chunks_exact_mut(4).enumerate() {
+        for (i, px) in self.base.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let (x, y) = (i % w, i / w);
             let t = (bayer8(x, y) as f64 + 0.5) / 64.0 - 0.5;
             for c in &mut px[..3] {
