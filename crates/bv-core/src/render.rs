@@ -40,6 +40,15 @@ pub fn crop_scale_rgba(
             (x0 * 4, x1 * 4, ((fx - x0 as f64) * 256.0) as u32)
         })
         .collect();
+    // Source bytes the taps touch: a zoomed view reads only part of a row.
+    let lo = xs.first().map_or(0, |t| t.0.min(t.1));
+    let hi = xs.last().map_or(0, |t| t.0.max(t.1) + 4);
+    // One row blended vertically, then sampled horizontally: the vertical
+    // pass is a straight run the compiler vectorizes, and the horizontal
+    // one does half the work of filtering both ways per pixel. The sums
+    // are the same products as a 2×2 filter, so results are identical.
+    // At most 255·256 per entry, so it fits a u16.
+    let mut line = vec![0u16; hi - lo];
 
     for (y, row) in dst
         .chunks_exact_mut(dw * 4)
@@ -50,15 +59,18 @@ pub fn crop_scale_rgba(
         let fy = (view.y + (y as f64 + 0.5) * sy - 0.5).clamp(0.0, max_y);
         let y0 = fy as usize;
         let y1 = (y0 + 1).min(sh - 1);
-        let wy = ((fy - y0 as f64) * 256.0) as u32;
-        let r0 = &src[y0 * sw * 4..(y0 + 1) * sw * 4];
-        let r1 = &src[y1 * sw * 4..(y1 + 1) * sw * 4];
+        let wy = ((fy - y0 as f64) * 256.0) as u16;
+        let r0 = &src[y0 * sw * 4 + lo..y0 * sw * 4 + hi];
+        let r1 = &src[y1 * sw * 4 + lo..y1 * sw * 4 + hi];
+        for ((v, &a), &b) in line.iter_mut().zip(r0).zip(r1) {
+            *v = a as u16 * (256 - wy) + b as u16 * wy;
+        }
 
         for (px, &(x0, x1, wx)) in row.as_chunks_mut::<4>().0.iter_mut().zip(&xs) {
+            let (a, b) = (&line[x0 - lo..][..4], &line[x1 - lo..][..4]);
             for c in 0..4 {
-                let top = r0[x0 + c] as u32 * (256 - wx) + r0[x1 + c] as u32 * wx;
-                let bot = r1[x0 + c] as u32 * (256 - wx) + r1[x1 + c] as u32 * wx;
-                px[c] = ((top * (256 - wy) + bot * wy + (1 << 15)) >> 16) as u8;
+                let v = a[c] as u32 * (256 - wx) + b[c] as u32 * wx;
+                px[c] = ((v + (1 << 15)) >> 16) as u8;
             }
         }
     }
@@ -204,6 +216,54 @@ mod tests {
         };
         crop_scale_rgba(&src, size, view, &mut dst, out, all(out));
         assert!(dst.chunks(4).all(|p| p == [200, 200, 200, 255]), "{dst:?}");
+    }
+
+    /// The straightforward 2×2 bilinear filter, per pixel.
+    fn bilinear_reference(src: &[u8], ss: Size, view: Rect, ds: Size) -> Vec<u8> {
+        let (sw, sh) = (ss.width as usize, ss.height as usize);
+        let (dw, dh) = (ds.width as usize, ds.height as usize);
+        let (sx, sy) = (view.width / dw as f64, view.height / dh as f64);
+        let mut dst = vec![0u8; dw * dh * 4];
+        for y in 0..dh {
+            let fy = (view.y + (y as f64 + 0.5) * sy - 0.5).clamp(0.0, (sh - 1) as f64);
+            let (y0, wy) = (fy as usize, ((fy - fy.floor()) * 256.0) as u32);
+            let y1 = (y0 + 1).min(sh - 1);
+            for x in 0..dw {
+                let fx = (view.x + (x as f64 + 0.5) * sx - 0.5).clamp(0.0, (sw - 1) as f64);
+                let (x0, wx) = (fx as usize, ((fx - fx.floor()) * 256.0) as u32);
+                let x1 = (x0 + 1).min(sw - 1);
+                for c in 0..4 {
+                    let p = |x: usize, y: usize| src[(y * sw + x) * 4 + c] as u32;
+                    let top = p(x0, y0) * (256 - wx) + p(x1, y0) * wx;
+                    let bot = p(x0, y1) * (256 - wx) + p(x1, y1) * wx;
+                    dst[(y * dw + x) * 4 + c] =
+                        ((top * (256 - wy) + bot * wy + (1 << 15)) >> 16) as u8;
+                }
+            }
+        }
+        dst
+    }
+
+    #[test]
+    fn separable_filter_matches_the_2x2_one_exactly() {
+        let ss = Size::new(97, 61);
+        let src: Vec<u8> = (0..97 * 61 * 4).map(|i| (i * 31 % 253) as u8).collect();
+        let cases = [
+            (Rect::full(ss), Size::new(97, 61)),
+            (Rect::full(ss), Size::new(150, 90)),
+            (Rect::full(ss), Size::new(60, 37)),
+            (Rect::zoomed(ss, 1.8, 90.0, 5.0), Size::new(97, 61)),
+            (Rect::zoomed(ss, 1.3, 10.0, 55.0), Size::new(131, 83)),
+            (Rect::zoomed(ss, 2.5, 48.0, 30.0), Size::new(40, 25)),
+        ];
+        for (view, ds) in cases {
+            let mut dst = vec![0u8; (ds.width * ds.height * 4) as usize];
+            crop_scale_rgba(&src, ss, view, &mut dst, ds, all(ds));
+            assert!(
+                dst == bilinear_reference(&src, ss, view, ds),
+                "{view:?} -> {ds:?}"
+            );
+        }
     }
 
     #[test]
