@@ -1,4 +1,5 @@
 mod clipboard;
+mod control;
 mod hotkey;
 #[cfg(feature = "tray")]
 mod settings;
@@ -10,6 +11,7 @@ mod ui;
 use std::{
     io::{self, BufRead, IsTerminal},
     path::{Path, PathBuf},
+    process::ExitCode,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -21,7 +23,7 @@ use std::{
 use anyhow::{Context, Result};
 use bv_core::{
     export, ffmpeg, monitor, zoom::ZoomTrigger, CaptureRegion, CursorTrack, Engine, ExportOptions,
-    MonitorChoice, OutputFormat, RecordOptions, Recording, ZoomConfig,
+    Exported, MonitorChoice, OutputFormat, RecordOptions, Recording, ZoomConfig,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -51,8 +53,40 @@ enum Command {
     Export(ExportCmd),
     /// List connected monitors (for --monitor).
     Monitors,
+    /// List visible windows (for --window).
+    Windows,
+    /// Stop recordings started by `bv record` in the background, wait for
+    /// them to export, and print their results.
+    Stop(StopArgs),
+    /// Install or print the Claude skill for recording demos with bv.
+    Skill(SkillArgs),
     /// Check that dependencies are installed.
     Doctor,
+}
+
+#[derive(Args)]
+struct StopArgs {
+    /// Give up waiting for the export after this many seconds.
+    #[arg(long, default_value_t = 300, value_name = "SECS")]
+    timeout: u64,
+}
+
+#[derive(Args)]
+struct SkillArgs {
+    #[command(subcommand)]
+    action: SkillAction,
+}
+
+#[derive(Subcommand)]
+enum SkillAction {
+    /// Write the skill to ~/.claude/skills/better-video/SKILL.md (or --dir).
+    Install {
+        /// Skills folder to install into [default: ~/.claude/skills].
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Print the skill.
+    Show,
 }
 
 #[derive(Args)]
@@ -93,6 +127,11 @@ struct CaptureArgs {
     /// area to record (Windows).
     #[arg(long, short = 's', conflicts_with_all = ["region", "monitor"])]
     select: bool,
+    /// Record the front-most window whose title contains TITLE
+    /// (case-insensitive; Windows). Its position when recording starts is
+    /// used. See `bv windows`.
+    #[arg(long, value_name = "TITLE", conflicts_with_all = ["region", "monitor", "select"])]
+    window: Option<String>,
     /// Seconds of countdown after pressing Record in the --select bar.
     #[arg(long, default_value_t = 3, value_name = "SECS")]
     countdown: u32,
@@ -159,6 +198,10 @@ struct ExportArgs {
     /// Copy the exported file to the clipboard.
     #[arg(long, short = 'c')]
     copy: bool,
+    /// Print the result as one line of JSON on stdout (path, bytes, format,
+    /// width, height, seconds) instead of a sentence.
+    #[arg(long)]
+    json: bool,
     /// Draw a ring wherever you click.
     #[arg(long)]
     clicks: bool,
@@ -177,6 +220,10 @@ struct ExportArgs {
     /// smoother and slower.
     #[arg(long, default_value_t = 0.8, value_name = "SECS")]
     zoom_smooth: f64,
+    /// For hover zoom: how long the cursor must stay put to count as
+    /// resting, in seconds.
+    #[arg(long, default_value_t = 0.6, value_name = "SECS")]
+    zoom_dwell: f64,
     /// Seconds to cut from the start (e.g. reaching for the mouse).
     #[arg(long, default_value_t = 0.0, value_name = "SECS")]
     trim_start: f64,
@@ -262,7 +309,7 @@ impl ExportArgs {
             trigger,
             hold_secs: self.zoom_hold.max(0.0),
             smoothing_secs: self.zoom_smooth.max(0.05),
-            ..ZoomConfig::default()
+            dwell_secs: self.zoom_dwell.max(0.1),
         })
     }
 
@@ -315,25 +362,93 @@ impl ExportArgs {
     }
 }
 
-fn main() -> Result<()> {
+/// Exit codes: 0 success, 1 error, 2 bad arguments (from clap), 3 the
+/// user cancelled the area picker or discarded the take.
+fn main() -> ExitCode {
     // Physical pixels everywhere, so monitor bounds, capture offsets and
     // cursor positions agree on scaled displays.
     monitor::set_dpi_aware();
-    match Cli::parse().command {
+    let result = match Cli::parse().command {
         Command::Record(args) => record(args),
         Command::Hotkey(args) => hotkey_mode(args),
         #[cfg(feature = "tray")]
         Command::Tray(args) => tray::run(args),
         Command::Export(args) => export_cmd(args),
         Command::Monitors => list_monitors(),
+        Command::Windows => list_windows(),
+        Command::Stop(args) => stop(args),
+        Command::Skill(args) => skill(args),
         Command::Doctor => doctor(),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.is::<ui::Cancelled>() => {
+            eprintln!("Cancelled.");
+            ExitCode::from(3)
+        }
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
     }
+}
+
+fn list_windows() -> Result<()> {
+    let list = bv_core::window::windows();
+    if list.is_empty() {
+        println!("Window listing isn't supported on this platform yet; use --region.");
+    }
+    for w in list {
+        println!("{w}");
+    }
+    Ok(())
+}
+
+fn stop(args: StopArgs) -> Result<()> {
+    let results = control::stop_all(Duration::from_secs(args.timeout))?;
+    if results.is_empty() {
+        eprintln!("No recordings running.");
+    }
+    for r in results {
+        println!("{r}");
+    }
+    Ok(())
+}
+
+/// The skill, bundled so `bv skill install` works from the binary alone.
+const SKILL: &str = include_str!("../../../skills/better-video/SKILL.md");
+
+fn skill(args: SkillArgs) -> Result<()> {
+    match args.action {
+        SkillAction::Show => print!("{SKILL}"),
+        SkillAction::Install { dir } => {
+            let dir = match dir {
+                Some(d) => d,
+                None => {
+                    let home = std::env::var_os("USERPROFILE")
+                        .or_else(|| std::env::var_os("HOME"))
+                        .context("can't find your home folder; pass --dir")?;
+                    PathBuf::from(home).join(".claude").join("skills")
+                }
+            };
+            let path = dir.join("better-video").join("SKILL.md");
+            std::fs::create_dir_all(path.parent().unwrap_or(&dir))?;
+            std::fs::write(&path, SKILL).with_context(|| format!("writing {}", path.display()))?;
+            println!("Installed {}", path.display());
+        }
+    }
+    Ok(())
 }
 
 impl CaptureArgs {
     /// The region to record: `--region`, else `--monitor`, else (on Windows,
     /// where the desktop spans every screen) the primary monitor.
     fn capture_region(&self) -> Result<Option<CaptureRegion>> {
+        if let Some(title) = &self.window {
+            let w = bv_core::window::find(title).map_err(anyhow::Error::msg)?;
+            eprintln!("Recording window {:?} at {}", w.title, w.region);
+            return Ok(Some(w.region));
+        }
         if self.region.is_some() || self.display.is_some() {
             return Ok(self.region);
         }
@@ -385,22 +500,18 @@ fn record(args: RecordArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| fresh_output(Path::new(""), format));
     let stop = stop_signal(true)?;
-    let mut session = match Session::start(&args.capture, output, format) {
-        Err(e) if e.is::<ui::Cancelled>() => {
-            eprintln!("Cancelled.");
-            return Ok(());
-        }
-        r => r?,
-    };
-    eprintln!("● Recording… press Enter or Ctrl+C to stop");
-    while !stop.load(Ordering::Relaxed) && !session.finished() {
+    // A cancelled picker returns Cancelled, which exits with code 3.
+    let mut session = Session::start(&args.capture, output.clone(), format)?;
+    // So `bv stop` (from a script or agent) can end it.
+    let active = control::Active::register(&output)?;
+    eprintln!("● Recording… press Enter or Ctrl+C to stop (or run `bv stop`)");
+    while !stop.load(Ordering::Relaxed) && !session.finished() && !active.stop_requested() {
         thread::sleep(Duration::from_millis(50));
     }
-    match session.finish() {
-        // Discarded from the recording pill.
-        Err(e) if e.is::<ui::Cancelled>() => Ok(()),
-        r => r.map(drop),
-    }
+    // Discarding from the recording pill also returns Cancelled.
+    let exported = session.finish()?;
+    active.done(&result_json(&exported));
+    Ok(())
 }
 
 fn hotkey_mode(mut args: HotkeyArgs) -> Result<()> {
@@ -560,7 +671,7 @@ impl Session {
     }
 
     /// Stop recording, export, and report the result.
-    fn finish(mut self) -> Result<PathBuf> {
+    fn finish(mut self) -> Result<Exported> {
         let discard =
             self.indicator.as_ref().and_then(|i| i.requested()) == Some(ui::StopRequest::Discard);
         // Close the on-screen frame right away.
@@ -612,7 +723,7 @@ impl Session {
             let _ = std::fs::remove_file(&raw);
         }
         let out = result?;
-        report(&out, args.export.copy);
+        report(&out, args.export.copy, args.export.json);
         Ok(out)
     }
 }
@@ -658,7 +769,7 @@ fn export_cmd(args: ExportCmd) -> Result<()> {
             "zoom/clicks need a cursor track; pass --cursor or record with --keep-raw"
         })?);
     }
-    report(&export(&opts)?, args.export.copy);
+    report(&export(&opts)?, args.export.copy, args.export.json);
     Ok(())
 }
 
@@ -807,14 +918,41 @@ fn cursor_sidecar(raw: &Path) -> PathBuf {
     raw.with_extension("cursor.json")
 }
 
-fn report(out: &Path, copy: bool) {
-    let size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
-    println!("Saved {} ({})", absolute(out).display(), human_size(size));
+/// The result as JSON, for `--json` and `bv stop`.
+fn result_json(out: &Exported) -> serde_json::Value {
+    let bytes = std::fs::metadata(&out.path).map_or(0, |m| m.len());
+    let format = OutputFormat::from_path(&out.path).map_or("unknown", |f| f.extension());
+    serde_json::json!({
+        "path": absolute(&out.path),
+        "bytes": bytes,
+        "format": format,
+        "width": out.width,
+        "height": out.height,
+        "seconds": (out.seconds * 100.0).round() / 100.0,
+    })
+}
+
+/// Print the result: a sentence, or one JSON line with `--json`. Progress
+/// and notes go to stderr, so stdout is only the result either way.
+fn report(out: &Exported, copy: bool, json: bool) {
+    let size = std::fs::metadata(&out.path).map_or(0, |m| m.len());
+    if json {
+        println!("{}", result_json(out));
+    } else {
+        println!(
+            "Saved {} ({}, {}×{}, {:.1}s)",
+            absolute(&out.path).display(),
+            human_size(size),
+            out.width,
+            out.height,
+            out.seconds
+        );
+    }
     if size > 10 * 1_048_576 {
         eprintln!("note: GitHub limits PR attachments to 10 MB; try --width 960, --fps 10 or --format mp4");
     }
     if copy {
-        match clipboard::copy_file(out) {
+        match clipboard::copy_file(&out.path) {
             Ok(()) => eprintln!("copied to clipboard"),
             Err(e) => eprintln!("warning: couldn't copy to clipboard: {e:#}"),
         }

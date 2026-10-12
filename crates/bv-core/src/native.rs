@@ -22,7 +22,8 @@ use crate::{
 
 /// `track` is already shifted for `trim_start`, and `None` unless zoom or
 /// click rings need it.
-pub fn export(opts: &ExportOptions, track: Option<&CursorTrack>) -> Result<()> {
+/// Returns the output size and length.
+pub fn export(opts: &ExportOptions, track: Option<&CursorTrack>) -> Result<(Size, f64)> {
     let reader = open(opts)?;
     let src = Size::new(reader.width(), reader.height());
     let out = src.fit_width(opts.width.unwrap_or(src.width));
@@ -39,9 +40,10 @@ pub fn export(opts: &ExportOptions, track: Option<&CursorTrack>) -> Result<()> {
         keep,
     };
     match opts.format {
-        OutputFormat::Gif => job.gif(),
-        _ => job.video(),
+        OutputFormat::Gif => job.gif()?,
+        _ => job.video()?,
     }
+    Ok((out, keep))
 }
 
 fn open(opts: &ExportOptions) -> Result<RawReader> {

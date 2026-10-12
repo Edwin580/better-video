@@ -130,7 +130,17 @@ impl ExportOptions {
     }
 }
 
-pub fn export(opts: &ExportOptions) -> Result<PathBuf> {
+/// What an export produced.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Exported {
+    pub path: PathBuf,
+    pub width: u32,
+    pub height: u32,
+    /// Length of the clip after trimming.
+    pub seconds: f64,
+}
+
+pub fn export(opts: &ExportOptions) -> Result<Exported> {
     let wants_cursor = opts.zoom.is_some() || opts.click_rings;
     let track = match &opts.cursor {
         Some(track) if wants_cursor && !track.is_empty() => {
@@ -141,8 +151,8 @@ pub fn export(opts: &ExportOptions) -> Result<PathBuf> {
         _ => None,
     };
     if bv_engine::raw::is_raw(&opts.input) {
-        native::export(opts, track.as_ref())?;
-        return Ok(opts.output.clone());
+        let (size, seconds) = native::export(opts, track.as_ref())?;
+        return Ok(exported(opts, size, seconds));
     }
 
     let info = ffmpeg::probe(&opts.input)?;
@@ -152,7 +162,18 @@ pub fn export(opts: &ExportOptions) -> Result<PathBuf> {
         Some(track) => export_rendered(opts, &input, track, info.size, out_size)?,
         None => export_plain(opts, &input, out_size)?,
     }
-    Ok(opts.output.clone())
+    let (start, end) = (opts.trim_start.max(0.0), opts.trim_end.max(0.0));
+    let seconds = trimmed_length(info.duration, start, end)?;
+    Ok(exported(opts, out_size, seconds))
+}
+
+fn exported(opts: &ExportOptions, size: Size, seconds: f64) -> Exported {
+    Exported {
+        path: opts.output.clone(),
+        width: size.width,
+        height: size.height,
+        seconds,
+    }
 }
 
 /// `-i` plus any seek/length options needed for trimming.

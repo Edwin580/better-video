@@ -393,6 +393,7 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
                     thread::spawn(move || {
                         let result = (*session)
                             .finish()
+                            .map(|e| e.path)
                             .map_err(|e| (!e.is::<ui::Cancelled>()).then(|| format!("{e:#}")));
                         let _ = proxy.send_event(UserEvent::Exported(result));
                     });

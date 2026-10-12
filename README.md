@@ -65,6 +65,28 @@ cargo install --path crates/bv-cli --features tray  # CLI + menu bar app
 bv doctor                 # what's available on this machine
 ```
 
+## For scripts and AI agents
+
+`bv` is built to be driven by tools as well as people:
+
+```sh
+bv record demo.gif --window "My App" -d 8 --json   # fixed length
+bv record demo.gif --window "My App" --json &      # or: start in the background,
+# ...drive the app...
+bv stop                                            # ...then stop; prints the result
+```
+
+- **Target by title.** `--window "Title"` records the front-most window
+  whose title contains the text; `bv windows` lists them.
+- **One JSON line.** With `--json`, stdout is exactly one line:
+  `{"path", "bytes", "format", "width", "height", "seconds"}`. Progress and
+  notes always go to stderr.
+- **Exit codes.** 0 saved, 1 error, 2 bad arguments, 3 cancelled or
+  discarded by a person.
+- **Claude skill.** `bv skill install` puts a ready-made skill in
+  `~/.claude/skills/better-video/`, so Claude Code knows how to record a
+  demo of the feature it's working on and link it from a PR.
+
 ## Privacy and corporate use
 
 better-video is local-only:
@@ -99,6 +121,9 @@ better-video is local-only:
 | `bv tray` | Tray (Windows, Linux) / menu bar (macOS) icon. On Windows, click it (or press the hotkey) to pick an area and options, then record; right-click for the menu: record the same area again, open or show the last clip, the save folder (shown in the menu, changeable), clipboard copy. Elsewhere the menu starts/stops recording the primary screen. Saves to `~/Videos/better-video` (`~/Movies` on macOS) unless `--dir` is set; a notification shows each saved file. Build with `--features tray`. |
 | `bv export RAW` | Re-export a raw recording (`bv record --keep-raw`) with different settings, e.g. try zoom on/off without re-recording. |
 | `bv monitors` | List connected monitors (Windows) with the number to pass to `--monitor`. |
+| `bv windows` | List visible windows (Windows), for `--window "Title"`. |
+| `bv stop` | Stop recordings running in the background, wait for their export, and print the results. |
+| `bv skill install` | Install the Claude skill for recording demos (`~/.claude/skills/better-video/SKILL.md`). `bv skill show` prints it. |
 | `bv doctor` | Check dependencies. |
 
 **Choosing what to record:** `-s/--select` dims every screen before recording:
@@ -117,13 +142,36 @@ by default. Pick another with `-m 2` (numbers from
 offsets may be negative for screens left of or above the primary one, e.g.
 `--region 1920x1080-1920+0`.
 
-**Zoom:** the camera eases in and out on springs (no snapping) and only pans
-when the cursor nears the edge of the zoomed view. It zooms in on each click
-(`click`), where the cursor comes to rest (`hover`), either
-(`click-or-hover`), or stays zoomed and follows the cursor (`follow`).
-`--zoom-smooth` sets roughly how long it takes to settle (default 0.8 s) and
-`--zoom-hold` how long it stays in. The `--select` bar offers Off / Click /
-Hover / Follow.
+### Zoom
+
+Zoom is applied when the clip is exported. Because the whole recording is
+known by then, the camera can start moving *before* a click or pause, so it
+already arrives when the action happens. Pick a mode with `--zoom-on` (or
+in the `--select` bar):
+
+| Mode | Zooms in when… | Aims at | Zooms back out when… |
+|---|---|---|---|
+| `click` (`-z`, bar: **Click**) | a mouse button goes down. The zoom starts 0.4 s before the press. | the click point | 1.5 s after the last click (`--zoom-hold`) with no new click |
+| `hover` (bar: **Hover**) | the cursor stays within about 1% of the screen width (19 px on a 1920 px screen) for 0.6 s (`--zoom-dwell`). Where the cursor sits when recording starts doesn't count. | where it rests | 1.5 s after the cursor moves on |
+| `click-or-hover` | either of the above | the click or rest point | 1.5 s after the last of them |
+| `follow` (`--zoom-follow`, bar: **Follow**) | the first frame | the cursor | never; it stays zoomed for the whole clip |
+| off (bar: **Off**) | never | n/a | n/a |
+
+In every mode:
+
+- **Zooms chain.** If a new click or rest starts less than 0.8 s after the
+  current zoom would end, the camera stays in and glides to the new point
+  instead of zooming out and back in.
+- **The camera holds steady.** While zoomed it pans only when the cursor
+  leaves the middle half of the view, so small movements don't shake the
+  picture.
+- **Motion is smooth.** Zoom and pan use critically damped springs: they
+  speed up and slow down gently, never overshoot, and land exactly, so a
+  still screen gives identical frames.
+
+Tuning: `--zoom-level 2` (magnification), `--zoom-hold 1.5`,
+`--zoom-dwell 0.6` and `--zoom-smooth 0.8` (roughly how many seconds the
+camera takes to settle; larger is slower and smoother).
 
 Useful flags: `-z/--zoom`, `--zoom-on click|hover|click-or-hover|follow`,
 `--zoom-level 2.5`, `--zoom-smooth 1.2`, `--zoom-hold 2`, `-w/--width 960`,
