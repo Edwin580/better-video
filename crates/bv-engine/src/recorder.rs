@@ -24,6 +24,11 @@ pub struct RecorderStats {
     pub captured: u64,
     /// Frames that differed and were stored.
     pub stored: u64,
+    /// Capture backend used ("dxgi" or "gdi").
+    pub backend: &'static str,
+    /// Seconds spent grabbing frames and storing them.
+    pub grab_secs: f64,
+    pub store_secs: f64,
 }
 
 pub struct Recorder {
@@ -97,21 +102,22 @@ fn run(
     stop: &AtomicBool,
 ) -> io::Result<RecorderStats> {
     let interval = Duration::from_secs_f64(1.0 / fps.clamp(1, 60) as f64);
-    let mut frame = Vec::new();
     let mut stats = RecorderStats {
         first_frame: 0.0,
         captured: 0,
         stored: 0,
+        backend: capture.backend(),
+        grab_secs: 0.0,
+        store_secs: 0.0,
     };
     let mut next = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         let t = origin.elapsed().as_secs_f64();
-        if frame.is_empty() {
-            // Sized lazily so a failed first grab doesn't cost the memory.
-            frame = vec![0u8; writer_len(writer)];
-        }
-        match capture.grab(&mut frame) {
-            Ok(()) => {}
+        let started = Instant::now();
+        let grabbed = capture.grab();
+        stats.grab_secs += started.elapsed().as_secs_f64();
+        let frame = match grabbed {
+            Ok(frame) => frame,
             // The first grab failing means the capture can't work at all.
             Err(e) if stats.captured == 0 => return Err(e),
             // Later failures are usually transient (screen locked, UAC
@@ -121,21 +127,22 @@ fn run(
                 wait(&mut next, interval);
                 continue;
             }
-        }
+        };
         if stats.captured == 0 {
             stats.first_frame = t;
         }
         stats.captured += 1;
-        if writer.push(t, &frame)? {
-            stats.stored += 1;
+        // `None`: the backend knows nothing changed, so skip comparing.
+        if let Some(frame) = frame {
+            let started = Instant::now();
+            if writer.push(t, frame)? {
+                stats.stored += 1;
+            }
+            stats.store_secs += started.elapsed().as_secs_f64();
         }
         wait(&mut next, interval);
     }
     Ok(stats)
-}
-
-fn writer_len(w: &RawWriter) -> usize {
-    w.width() * w.height() * 4
 }
 
 /// Sleep until the next tick at a fixed cadence; if a grab overran, skip

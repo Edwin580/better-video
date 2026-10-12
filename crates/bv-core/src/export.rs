@@ -279,7 +279,7 @@ fn pump_frames(
     while read_frame(&mut reader, &mut frame)? {
         let t = index as f64 / opts.fps as f64;
         let view = planner.as_mut().map_or(Rect::full(src), |p| p.next(t));
-        crop_scale_rgba(&frame, src, view, &mut scaled, out);
+        crop_scale_rgba(&frame, src, view, &mut scaled, out, 0..out.height as usize);
         if let Some(rings) = &rings {
             rings.draw(&mut scaled, out, view, t);
         }

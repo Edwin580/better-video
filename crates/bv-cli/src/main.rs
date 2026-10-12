@@ -564,6 +564,7 @@ impl Session {
         let secs = self.recording.elapsed().as_secs_f64();
         let mut track = self.tracker.map(CursorTracker::finish);
         let recorded = self.recording.stop()?;
+        let recorded_stats = recorded.stats;
         let raw = recorded.path;
         if let Some(t) = &mut track {
             t.shift_earlier(recorded.first_frame_delay);
@@ -573,7 +574,21 @@ impl Session {
             eprintln!("■ Discarded");
             return Err(ui::Cancelled.into());
         }
-        eprintln!("■ Stopped after {secs:.1}s, exporting…");
+        match &recorded_stats {
+            Some(s) => eprintln!(
+                "■ Stopped after {secs:.1}s ({} frames, {} changed, {}), exporting…",
+                s.captured, s.stored, s.backend
+            ),
+            None => eprintln!("■ Stopped after {secs:.1}s, exporting…"),
+        }
+        if let (Some(s), true) = (&recorded_stats, std::env::var_os("BV_PROFILE").is_some()) {
+            let per = |secs: f64, n: u64| secs * 1000.0 / n.max(1) as f64;
+            eprintln!(
+                "  capture: {:.2} ms/grab, {:.2} ms/stored frame",
+                per(s.grab_secs, s.captured),
+                per(s.store_secs, s.stored)
+            );
+        }
 
         if args.keep_raw {
             if let Some(t) = &track {
@@ -583,7 +598,11 @@ impl Session {
 
         let mut eopts = args.export.options(raw.clone(), self.output, self.format);
         eopts.cursor = track;
+        let export_started = Instant::now();
         let result = export(&eopts);
+        if std::env::var_os("BV_PROFILE").is_some() {
+            eprintln!("  export: {:.2} s", export_started.elapsed().as_secs_f64());
+        }
         if !args.keep_raw {
             let _ = std::fs::remove_file(&raw);
         }
