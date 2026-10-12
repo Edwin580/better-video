@@ -5,6 +5,7 @@
 //! [`canvas::Canvas`]; a window's behaviour lives in a [`Handler`].
 
 pub mod canvas;
+pub mod indicator;
 pub mod picker;
 
 use std::{cell::Cell, ptr};

@@ -252,13 +252,11 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
                     }
                 }
                 State::Recording(session) => {
-                    items.apply(&mut capture);
                     items.show_exporting();
                     tray.iter().for_each(|t| set_icon(t, false));
-                    let capture = capture.clone();
                     let proxy = proxy.clone();
                     thread::spawn(move || {
-                        let result = (*session).finish(&capture).map_err(|e| format!("{e:#}"));
+                        let result = (*session).finish().map_err(|e| format!("{e:#}"));
                         let _ = proxy.send_event(UserEvent::Exported(result));
                     });
                     State::Exporting

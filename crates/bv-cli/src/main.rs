@@ -91,6 +91,9 @@ struct CaptureArgs {
     /// area to record (Windows).
     #[arg(long, short = 's', conflicts_with_all = ["region", "monitor"])]
     select: bool,
+    /// Seconds of countdown after pressing Record in the --select bar.
+    #[arg(long, default_value_t = 3, value_name = "SECS")]
+    countdown: u32,
     /// Screen to capture with the ffmpeg engine (X11 display, avfoundation
     /// device or gdigrab target).
     #[arg(long)]
@@ -188,6 +191,16 @@ impl From<Format> for OutputFormat {
     }
 }
 
+impl From<OutputFormat> for Format {
+    fn from(f: OutputFormat) -> Self {
+        match f {
+            OutputFormat::Gif => Format::Gif,
+            OutputFormat::Mp4 => Format::Mp4,
+            OutputFormat::Webm => Format::Webm,
+        }
+    }
+}
+
 impl ExportArgs {
     fn format(&self, output: Option<&Path>) -> OutputFormat {
         if self.gif {
@@ -209,6 +222,31 @@ impl ExportArgs {
             },
             ..ZoomConfig::default()
         })
+    }
+
+    /// Initial state of the --select options bar.
+    fn choices(&self, format: OutputFormat) -> ui::Choices {
+        ui::Choices {
+            format,
+            quality: ui::Quality::from_width(self.width),
+            clicks: self.clicks,
+            zoom: self.zoom || self.zoom_follow,
+        }
+    }
+
+    /// Take on what was picked in the options bar.
+    fn apply(&mut self, c: &ui::Choices) {
+        self.format = Some(c.format.into());
+        self.gif = false;
+        self.width = c.quality.width();
+        self.fps = Some(c.quality.fps());
+        self.clicks = c.clicks;
+        if !c.zoom {
+            self.zoom = false;
+            self.zoom_follow = false;
+        } else if !self.zoom_follow {
+            self.zoom = true;
+        }
     }
 
     fn fps(&self, format: OutputFormat) -> u32 {
@@ -314,7 +352,7 @@ fn record(args: RecordArgs) -> Result<()> {
     while !stop.load(Ordering::Relaxed) && !session.finished() {
         thread::sleep(Duration::from_millis(50));
     }
-    session.finish(&args.capture).map(drop)
+    session.finish().map(drop)
 }
 
 fn hotkey_mode(mut args: HotkeyArgs) -> Result<()> {
@@ -350,7 +388,7 @@ fn hotkey_mode(mut args: HotkeyArgs) -> Result<()> {
             }
             Some(_) if pressed || quitting || ended => {
                 if let Some(s) = session.take() {
-                    if let Err(e) = s.finish(&args.capture) {
+                    if let Err(e) = s.finish() {
                         eprintln!("error: {e:#}");
                     }
                 }
@@ -369,12 +407,37 @@ fn hotkey_mode(mut args: HotkeyArgs) -> Result<()> {
 struct Session {
     recording: Recording,
     tracker: Option<CursorTracker>,
+    indicator: Option<ui::Indicator>,
+    /// Settings for this clip: the caller's, plus anything picked in the
+    /// options bar.
+    args: CaptureArgs,
     output: PathBuf,
     format: OutputFormat,
 }
 
 impl Session {
-    fn start(args: &CaptureArgs, output: PathBuf, format: OutputFormat) -> Result<Self> {
+    fn start(args: &CaptureArgs, mut output: PathBuf, mut format: OutputFormat) -> Result<Self> {
+        let mut args = args.clone();
+        let region = if args.select {
+            let req = ui::PickRequest {
+                choices: args.export.choices(format),
+                save_dir: absolute(&output)
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default(),
+                countdown: args.countdown,
+            };
+            let picked = ui::pick(req)?.ok_or(ui::Cancelled)?;
+            args.export.apply(&picked.choices);
+            if picked.choices.format != format {
+                format = picked.choices.format;
+                output.set_extension(format.extension());
+            }
+            Some(picked.region)
+        } else {
+            args.capture_region()?
+        };
+
         let engine = args.engine();
         let raw_ext = format!("raw.{}", engine.raw_extension());
         let raw = if args.keep_raw {
@@ -388,11 +451,6 @@ impl Session {
                     .file_name()
                     .context("bad output path")?,
             )
-        };
-        let region = if args.select {
-            Some(ui::pick_region()?.ok_or(ui::Cancelled)?)
-        } else {
-            args.capture_region()?
         };
         let opts = RecordOptions {
             fps: args.capture_fps(engine, format),
@@ -413,20 +471,28 @@ impl Session {
         } else {
             None
         };
+        let indicator = ui::Indicator::show(region.unwrap_or_else(monitor::virtual_screen));
         Ok(Self {
             recording,
             tracker,
+            indicator,
+            args,
             output,
             format,
         })
     }
 
+    /// True once the duration limit passed, capture stopped by itself, or
+    /// the on-screen Stop button was clicked.
     fn finished(&mut self) -> bool {
-        self.recording.finished()
+        self.recording.finished() || self.indicator.as_ref().is_some_and(|i| i.stop_requested())
     }
 
     /// Stop recording, export, and report the result.
-    fn finish(self, args: &CaptureArgs) -> Result<PathBuf> {
+    fn finish(mut self) -> Result<PathBuf> {
+        // Close the on-screen frame right away.
+        self.indicator = None;
+        let args = &self.args;
         let secs = self.recording.elapsed().as_secs_f64();
         let mut track = self.tracker.map(CursorTracker::finish);
         let recorded = self.recording.stop()?;
@@ -452,6 +518,11 @@ impl Session {
         report(&out, args.export.copy);
         Ok(out)
     }
+}
+
+/// `path` made absolute against the current directory.
+fn absolute(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn export_cmd(args: ExportCmd) -> Result<()> {
