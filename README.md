@@ -12,6 +12,7 @@ bv record --clicks        # draw a ring wherever you click
 bv record -c              # copy the result to the clipboard
 bv record -d 10 --region 1280x720+0+0 --width 960
 bv hotkey --dir ~/Videos  # Ctrl+Alt+R starts/stops; each clip is copied
+bv tray                   # same, from a menu bar / tray icon
 ```
 
 ## Install (from source)
@@ -19,10 +20,12 @@ bv hotkey --dir ~/Videos  # Ctrl+Alt+R starts/stops; each clip is copied
 Requirements: Rust (stable) and [`ffmpeg`](https://ffmpeg.org/download.html) on
 your `PATH` (or point `BV_FFMPEG` / `BV_FFPROBE` at it). On Linux, cursor zoom
 needs X11 headers (`libx11-dev`), and `--copy` needs `xclip` (X11) or
-`wl-clipboard` (Wayland).
+`wl-clipboard` (Wayland). The menu bar app on Linux needs `libgtk-3-dev`,
+`libayatana-appindicator3-dev` and `libxdo-dev`.
 
 ```sh
-cargo install --path crates/bv-cli
+cargo install --path crates/bv-cli                  # CLI
+cargo install --path crates/bv-cli --features tray  # CLI + menu bar app
 bv doctor                 # checks ffmpeg + cursor tracking
 ```
 
@@ -32,6 +35,7 @@ bv doctor                 # checks ffmpeg + cursor tracking
 | --- | --- |
 | `bv record [OUT]` | Record the screen, export when you stop. Format comes from `--format`, `--gif`, or the file extension (default GIF). |
 | `bv hotkey` | Run in the background. `--key` (default `ctrl+alt+r`) starts and stops a recording; each one is exported to `--dir` and copied to the clipboard. Takes the same capture/export flags as `record`. macOS needs Input Monitoring permission. |
+| `bv tray` | Menu bar (macOS) / tray (Windows, Linux) icon: start/stop recording, toggle zoom, click rings and clipboard copy, pick GIF/MP4/WebM, open the last clip. The hotkey works here too. Saves to `~/Movies/better-video` (macOS) or `~/Videos/better-video`. Build with `--features tray`. |
 | `bv export RAW` | Re-export a raw recording (`bv record --keep-raw`) with different settings, e.g. try zoom on/off without re-recording. |
 | `bv doctor` | Check dependencies. |
 
@@ -68,7 +72,8 @@ Ease of access is the goal: one hotkey to start, one to stop, link on the
 clipboard.
 
 - [x] Global hotkey to start/stop (`bv hotkey`)
-- [ ] Desktop shell (tray/menu-bar app) with drag-to-select region
+- [x] Menu bar / tray app (`bv tray`)
+- [ ] Drag-to-select capture region
 - [x] Copy the output file to the clipboard after export
 - [x] Trim start/end before export
 - [x] Align cursor timestamps with ffmpeg's first frame
