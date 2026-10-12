@@ -823,7 +823,7 @@ fn stop_signal(enter: bool) -> Result<Arc<AtomicBool>> {
     let s = stop.clone();
     ctrlc::set_handler(move || s.store(true, Ordering::Relaxed))
         .context("installing Ctrl+C handler")?;
-    if enter && io::stdin().is_terminal() {
+    if enter && io::stdin().is_terminal() && in_foreground() {
         let s = stop.clone();
         thread::spawn(move || {
             let _ = io::stdin().lock().lines().next();
@@ -831,6 +831,19 @@ fn stop_signal(enter: bool) -> Result<Arc<AtomicBool>> {
         });
     }
     Ok(stop)
+}
+
+/// Whether we own the terminal. Reading it from the background (`bv record
+/// ... &` in an interactive shell) gets the whole process stopped by the
+/// kernel, so then only `bv stop` (or a signal) ends the recording.
+#[cfg(unix)]
+fn in_foreground() -> bool {
+    unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) == libc::getpgrp() }
+}
+
+#[cfg(not(unix))]
+fn in_foreground() -> bool {
+    true
 }
 
 /// A new file in `dir` named after the current time, with `-2`, `-3`, …
