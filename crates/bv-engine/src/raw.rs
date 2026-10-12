@@ -54,6 +54,7 @@ pub struct RawWriter {
     /// The previous frame as stored; empty before the first one.
     prev: Vec<u8>,
     payload: Vec<u8>,
+    packed: Vec<u8>,
     frames: u64,
 }
 
@@ -70,6 +71,7 @@ impl RawWriter {
             height: height as usize,
             prev: Vec::new(),
             payload: Vec::new(),
+            packed: Vec::new(),
             frames: 0,
         })
     }
@@ -101,8 +103,23 @@ impl RawWriter {
             self.prev = bgra.to_vec();
         }
         self.payload.clear();
+        let cols = w.div_ceil(TILE);
+        let mut skip_to = 0;
         for i in 0..tile_count(w, h) {
             let (x, y, tw, th) = tile_rect(i, w, h);
+            // A band of tiles is a contiguous run of rows: when it hasn't
+            // changed at all (most of a typical screen), one comparison
+            // settles every tile in it.
+            if !first && x == 0 {
+                let band = y * w * 4..(y + th) * w * 4;
+                if bgra[band.clone()] == self.prev[band] {
+                    // Skip to the next band's first tile.
+                    skip_to = i + cols;
+                }
+            }
+            if i < skip_to {
+                continue;
+            }
             let rows = (y..y + th).map(|r| (r * w + x) * 4..(r * w + x + tw) * 4);
             let changed = first
                 || rows
@@ -121,11 +138,19 @@ impl RawWriter {
         if self.payload.is_empty() {
             return Ok(false);
         }
-        let packed = lz4_flex::compress_prepend_size(&self.payload);
+        // Same layout as `lz4_flex::compress_prepend_size`, into a buffer
+        // that's reused: a fresh multi-megabyte allocation per frame costs
+        // more in page faults than the compression itself.
+        let max = lz4_flex::block::get_maximum_output_size(self.payload.len());
+        self.packed.resize(4 + max, 0);
+        self.packed[..4].copy_from_slice(&(self.payload.len() as u32).to_le_bytes());
+        let n = lz4_flex::block::compress_into(&self.payload, &mut self.packed[4..])
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        let packed = &self.packed[..4 + n];
         self.out.write_all(&[FRAME])?;
         self.out.write_all(&t.to_le_bytes())?;
         self.out.write_all(&(packed.len() as u32).to_le_bytes())?;
-        self.out.write_all(&packed)?;
+        self.out.write_all(packed)?;
         self.frames += 1;
         Ok(true)
     }
@@ -151,6 +176,7 @@ pub struct RawReader {
     /// Header of the next frame record, already read: (time, length).
     next: Option<(f64, u32)>,
     packed: Vec<u8>,
+    payload: Vec<u8>,
 }
 
 fn read_u8(r: &mut impl Read) -> io::Result<u8> {
@@ -226,6 +252,7 @@ impl RawReader {
             end: end.max(first),
             next: None,
             packed: Vec::new(),
+            payload: Vec::new(),
         };
         reader.read_header()?;
         Ok(reader)
@@ -279,9 +306,11 @@ impl RawReader {
             }
             self.packed.resize(len as usize, 0);
             self.r.read_exact(&mut self.packed)?;
-            let payload = lz4_flex::decompress_size_prepended(&self.packed)
-                .map_err(|_| invalid("corrupt .bvraw frame"))?;
-            if let Some(rows) = self.apply(&payload)? {
+            self.unpack()?;
+            let payload = std::mem::take(&mut self.payload);
+            let applied = self.apply(&payload);
+            self.payload = payload;
+            if let Some(rows) = applied? {
                 changed = Some(match changed {
                     Some(c) => c.start.min(rows.start)..c.end.max(rows.end),
                     None => rows,
@@ -290,6 +319,25 @@ impl RawReader {
             self.read_header()?;
         }
         Ok(changed)
+    }
+
+    /// Decompress `packed` into `payload`, reusing both buffers.
+    fn unpack(&mut self) -> io::Result<()> {
+        let corrupt = || invalid("corrupt .bvraw frame");
+        let (size, block) = self.packed.split_first_chunk::<4>().ok_or_else(corrupt)?;
+        let size = u32::from_le_bytes(*size) as usize;
+        // Every tile once, with its index: no frame can be larger.
+        let (w, h) = (self.width as usize, self.height as usize);
+        if size > w * h * 4 + tile_count(w, h) * 4 {
+            return Err(corrupt());
+        }
+        self.payload.resize(size, 0);
+        let n =
+            lz4_flex::block::decompress_into(block, &mut self.payload).map_err(|_| corrupt())?;
+        if n != size {
+            return Err(corrupt());
+        }
+        Ok(())
     }
 
     /// Apply one frame's tiles; returns the rows they cover.
@@ -404,6 +452,23 @@ mod tests {
         let mut rd = RawReader::open(&path).unwrap();
         rd.advance_to(0.25).unwrap();
         assert_eq!(rd.frame(), &rgba(&c)[..]);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn frames_are_standard_size_prepended_lz4() {
+        // Older readers decode with `decompress_size_prepended`.
+        let path = temp("lz4.bvraw");
+        let frame: Vec<u8> = (0..32 * 32 * 4).map(|i| (i % 7) as u8).collect();
+        let mut wr = RawWriter::create(&path, 32, 32).unwrap();
+        wr.push(0.0, &frame).unwrap();
+        wr.finish(0.1).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        // Header (16 bytes), then tag, time and length of the first record.
+        let len = u32::from_le_bytes(bytes[25..29].try_into().unwrap()) as usize;
+        let payload = lz4_flex::decompress_size_prepended(&bytes[29..29 + len]).unwrap();
+        assert_eq!(&payload[..4], &0u32.to_le_bytes());
+        assert_eq!(&payload[4..], &frame[..]);
         std::fs::remove_file(path).ok();
     }
 
