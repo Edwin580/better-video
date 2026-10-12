@@ -11,6 +11,7 @@ bv record --zoom-follow   # stay zoomed and follow the cursor
 bv record --clicks        # draw a ring wherever you click
 bv record -c              # copy the result to the clipboard
 bv record -d 10 --region 1280x720+0+0 --width 960
+bv hotkey --dir ~/Videos  # Ctrl+Alt+R starts/stops; each clip is copied
 ```
 
 ## Install (from source)
@@ -30,6 +31,7 @@ bv doctor                 # checks ffmpeg + cursor tracking
 | Command | What it does |
 | --- | --- |
 | `bv record [OUT]` | Record the screen, export when you stop. Format comes from `--format`, `--gif`, or the file extension (default GIF). |
+| `bv hotkey` | Run in the background. `--key` (default `ctrl+alt+r`) starts and stops a recording; each one is exported to `--dir` and copied to the clipboard. Takes the same capture/export flags as `record`. macOS needs Input Monitoring permission. |
 | `bv export RAW` | Re-export a raw recording (`bv record --keep-raw`) with different settings, e.g. try zoom on/off without re-recording. |
 | `bv doctor` | Check dependencies. |
 
@@ -65,8 +67,8 @@ crates/
 Ease of access is the goal: one hotkey to start, one to stop, link on the
 clipboard.
 
-- [ ] Desktop shell (tray/menu-bar app, e.g. Tauri) with a global hotkey and
-      drag-to-select region
+- [x] Global hotkey to start/stop (`bv hotkey`)
+- [ ] Desktop shell (tray/menu-bar app) with drag-to-select region
 - [x] Copy the output file to the clipboard after export
 - [x] Trim start/end before export
 - [x] Align cursor timestamps with ffmpeg's first frame

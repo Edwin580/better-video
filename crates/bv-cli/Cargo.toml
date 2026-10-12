@@ -9,9 +9,10 @@ name = "bv"
 path = "src/main.rs"
 
 [features]
-default = ["cursor"]
-# Global cursor tracking (needed for --zoom). Requires X11 libs on Linux.
-cursor = ["dep:device_query"]
+default = ["input"]
+# Global mouse/keyboard access: cursor tracking for --zoom/--clicks and the
+# `bv hotkey` mode. Requires X11 libs on Linux.
+input = ["dep:device_query"]
 
 [dependencies]
 anyhow.workspace = true
