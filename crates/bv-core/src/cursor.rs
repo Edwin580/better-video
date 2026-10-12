@@ -22,6 +22,11 @@ pub struct CursorSample {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CursorTrack {
     pub samples: Vec<CursorSample>,
+    /// The recording was made without the OS pointer so that it's drawn
+    /// from this track at export (see [`crate::pointer`]). False for
+    /// recordings with the OS pointer in them, or with none at all.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draw_pointer: bool,
 }
 
 impl CursorTrack {
@@ -96,6 +101,7 @@ mod tests {
     fn interpolates_and_clamps() {
         let track = CursorTrack {
             samples: vec![s(1.0, 0.0, false), s(2.0, 100.0, false)],
+            ..Default::default()
         };
         assert_eq!(track.position_at(0.0), Some((0.0, 0.0)));
         assert_eq!(track.position_at(1.5), Some((50.0, 50.0)));
@@ -112,9 +118,22 @@ mod tests {
                 s(0.2, 0.0, true),
                 s(0.3, 0.0, true),
             ],
+            ..Default::default()
         };
         let mut clicks: Vec<_> = track.clicks().collect();
         clicks.sort_by(f64::total_cmp);
         assert_eq!(clicks, vec![0.0, 0.2]);
+    }
+
+    #[test]
+    fn older_tracks_had_the_os_pointer() {
+        let old: CursorTrack = serde_json::from_str(r#"{"samples":[]}"#).unwrap();
+        assert!(!old.draw_pointer);
+        let new = CursorTrack {
+            draw_pointer: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&new).unwrap();
+        assert_eq!(serde_json::from_str::<CursorTrack>(&json).unwrap(), new);
     }
 }

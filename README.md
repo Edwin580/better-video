@@ -10,6 +10,7 @@ bv record demo.mp4 -z     # MP4, zooms in around each click
 bv record --zoom-on hover # zoom where the cursor rests (also click, follow)
 bv record --clicks        # draw a ring wherever you click
 bv record --style gradient # framed: background, rounded corners, shadow
+bv record --cursor-size 2  # bigger pointer (drawn at export, smoothed)
 bv record -c              # copy the result to the clipboard
 bv record -s              # pick a screen or drag out an area first (Windows)
 bv record -d 10 --region 1280x720+0+0 --width 960
@@ -99,8 +100,10 @@ better-video is local-only:
   start and stop. The mouse pointer is included unless you pass
   `--no-cursor`. The selection overlay, the red frame, the Stop pill and
   notifications are excluded from capture, so they never end up in a clip.
-  Nothing records audio, keystrokes or the camera. Click positions are
-  sampled only when click rings or zoom are on, and only to draw them.
+  Nothing records audio, keystrokes or the camera. The pointer's position
+  and button state are sampled while recording, only to draw the pointer,
+  click rings and zoom (not with `--cursor os` or `--no-cursor` unless
+  zoom or click rings are on).
 - **Where files go:** the output file you name, or `Videos\better-video`
   for the tray. While recording, a raw intermediate is kept in
   `%TEMP%\better-video` and deleted after export; leftovers from a crash
@@ -196,10 +199,40 @@ recording is never scaled up, the padding is added around it. Fine-tune with
 never changes, so a styled GIF only stores it once and costs little more
 than an unstyled one.
 
+### Pointer
+
+By default the pointer isn't captured with the screen: bv records where it
+is (the same ~120 Hz track zoom uses) and draws a crisp arrow at export,
+white with a dark outline and a soft shadow. That means it can be:
+
+- **bigger** — `--cursor-size SCALE`, relative to a standard system arrow at
+  the output's scale (default 1.5). It grows a little when zoomed in (by the
+  square root of the zoom).
+- **smooth** — `--cursor-smooth SECS` (default 0.15, about how long it
+  takes to catch up; 0 follows the recorded path exactly). Jitter and
+  low-frame-rate steps go away, yet at each click it's exactly where you
+  clicked, and once you stop it settles exactly, so a still pointer costs
+  nothing in a GIF.
+- **pressed** — it squashes a little while a button is held
+  (`--no-cursor-bounce` turns that off).
+- **hidden when idle** — `--cursor-hide SECS` fades it out after that long
+  without moving and back in just before it moves (off by default: in a
+  short demo a pointer that vanishes reads as a glitch).
+
+It's always an arrow: the I-beam, hand and resize shapes aren't drawn.
+`--cursor os` records the system pointer in the frames instead (the old
+behaviour, and the fallback when cursor tracking isn't available, e.g. a
+build without the `input` feature or no X11), and `--no-cursor` (or
+`--cursor none`) leaves it out. A `--keep-raw` take made with the drawn
+pointer can be re-exported with any `--cursor-*` settings, or with
+`--no-cursor`; `bv export` draws it again by default. `bv export --track
+PATH` names the cursor track if it isn't next to the recording.
+
 Useful flags: `-z/--zoom`, `--zoom-on click|hover|click-or-hover|follow`,
 `--zoom-level 2.5`, `--zoom-smooth 1.2`, `--zoom-hold 2`, `-w/--width 960`,
 `--fps 10`, `-d/--duration 15`, `-m/--monitor 2`, `--region WxH+X+Y`,
-`--trim-start 0.5`, `--trim-end 1`, `--style clean|gradient|dark`.
+`--trim-start 0.5`, `--trim-end 1`, `--style clean|gradient|dark`,
+`--cursor drawn|os|none`, `--cursor-size 2`, `--cursor-hide 3`.
 
 **Size tips:** GitHub caps PR attachments at 10 MB. MP4 is usually 3–10×
 smaller than GIF for the same clip and GitHub plays it inline; use GIF where
@@ -212,8 +245,8 @@ engines; Windows uses the native one by default (`--engine ffmpeg` switches).
 
 **Native engine** (`bv-engine`, Windows, no ffmpeg needed for GIF):
 
-1. **Record** — the region is grabbed at the export frame rate, cursor
-   included. On one monitor that's DXGI desktop duplication: the GPU copies
+1. **Record** — the region is grabbed at the export frame rate (with the
+   cursor drawn in by `DrawIconEx` only for `--cursor os`). On one monitor that's DXGI desktop duplication: the GPU copies
    the screen and Windows says when nothing changed, so an idle screen costs
    almost nothing. Areas spanning monitors (or machines where duplication
    isn't available) use GDI `BitBlt`. Frames are compared in the capture
@@ -243,6 +276,11 @@ and export time went.
 Either way a background thread samples the cursor at ~120 Hz into a JSON
 track, `ZoomPlanner` picks a viewport per frame (eased, frame-rate
 independent, clamped to the screen), and `render` crops + scales in one pass.
+The pointer is then drawn from the track: a spring-smoothed path (pulled back
+onto the recorded one around each click, snapping once settled) and a
+signed-distance arrow, anti-aliased, mapped through the zoom viewport like
+click rings. The native exporter only redraws the rows where the pointer was
+and is, so a still pointer leaves frames identical.
 With `--style`, the background and shadow are drawn once and each frame's
 changed rows are copied into the frame with anti-aliased corners, so
 everything outside the recording is byte-identical from frame to frame (the

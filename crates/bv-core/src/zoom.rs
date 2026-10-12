@@ -296,6 +296,7 @@ mod tests {
                 .iter()
                 .map(|&(t, x, y, pressed)| CursorSample { t, x, y, pressed })
                 .collect(),
+            ..Default::default()
         }
     }
 

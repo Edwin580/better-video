@@ -23,8 +23,8 @@ use std::{
 use anyhow::{Context, Result};
 use bv_core::{
     export, ffmpeg, monitor, zoom::ZoomTrigger, Background, CaptureRegion, CursorTrack, Engine,
-    ExportOptions, Exported, FrameStyle, MonitorChoice, OutputFormat, RecordOptions, Recording,
-    StylePreset, ZoomConfig,
+    ExportOptions, Exported, FrameStyle, MonitorChoice, OutputFormat, PointerStyle, RecordOptions,
+    Recording, StylePreset, ZoomConfig,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -152,12 +152,9 @@ struct CaptureArgs {
     #[arg(long, value_enum)]
     engine: Option<EngineArg>,
     /// Keep the raw recording + cursor track next to the output so you can
-    /// re-run `bv export` later.
+    /// re-run `bv export` later (with different --cursor-* settings too).
     #[arg(long)]
     keep_raw: bool,
-    /// Leave the mouse pointer out of the recording.
-    #[arg(long)]
-    no_cursor: bool,
     #[command(flatten)]
     export: ExportArgs,
 }
@@ -170,8 +167,8 @@ struct ExportCmd {
     #[arg(long, short)]
     output: Option<PathBuf>,
     /// Cursor track JSON. Defaults to <input>.cursor.json if it exists.
-    #[arg(long)]
-    cursor: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    track: Option<PathBuf>,
     #[command(flatten)]
     export: ExportArgs,
 }
@@ -247,6 +244,41 @@ struct ExportArgs {
     /// width]. Implies --style clean if no style is set.
     #[arg(long, value_name = "PX")]
     radius: Option<u32>,
+    /// How the mouse pointer is shown: `drawn` (recorded without it, then
+    /// drawn crisp, larger and smoothed at export; needs cursor tracking),
+    /// `os` (the system pointer as captured) or `none` [default: drawn
+    /// where cursor tracking works, else os; for `bv export`, what the
+    /// recording was made with].
+    #[arg(long, value_enum, value_name = "MODE")]
+    cursor: Option<CursorMode>,
+    /// Leave the mouse pointer out. Same as --cursor none.
+    #[arg(long, conflicts_with = "cursor")]
+    no_cursor: bool,
+    /// Drawn pointer size, relative to a standard system arrow.
+    #[arg(long, default_value_t = 1.5, value_name = "SCALE")]
+    cursor_size: f64,
+    /// Roughly how long the drawn pointer takes to catch up with the real
+    /// one, in seconds; 0 follows the recorded path exactly. It's always
+    /// exactly on target when you click.
+    #[arg(long, default_value_t = 0.15, value_name = "SECS")]
+    cursor_smooth: f64,
+    /// Fade the drawn pointer out once it's been still this many seconds
+    /// (it fades back in before it moves) [default: never].
+    #[arg(long, value_name = "SECS")]
+    cursor_hide: Option<f64>,
+    /// Don't squash the drawn pointer while a button is held.
+    #[arg(long)]
+    no_cursor_bounce: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+enum CursorMode {
+    /// Drawn at export from the cursor track.
+    Drawn,
+    /// The system pointer, captured in the frames.
+    Os,
+    /// No pointer.
+    None,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -375,6 +407,24 @@ impl ExportArgs {
 
     fn needs_cursor(&self) -> bool {
         self.zoom().is_some() || self.clicks
+    }
+
+    /// `--cursor`, or `none` for `--no-cursor`; `None` picks a default.
+    fn cursor_mode(&self) -> Option<CursorMode> {
+        if self.no_cursor {
+            Some(CursorMode::None)
+        } else {
+            self.cursor
+        }
+    }
+
+    fn pointer_style(&self) -> PointerStyle {
+        PointerStyle {
+            scale: self.cursor_size.clamp(0.25, 8.0),
+            smoothing_secs: self.cursor_smooth.max(0.0),
+            bounce: !self.no_cursor_bounce,
+            hide_after: self.cursor_hide.map(|s| s.max(0.0)),
+        }
     }
 
     fn options(&self, input: PathBuf, output: PathBuf, format: OutputFormat) -> ExportOptions {
@@ -631,6 +681,8 @@ struct Session {
     args: CaptureArgs,
     output: PathBuf,
     format: OutputFormat,
+    /// How the pointer ends up in the video.
+    cursor: CursorMode,
 }
 
 impl Session {
@@ -660,6 +712,18 @@ impl Session {
             None => args.capture_region()?,
         };
 
+        // Drawing the pointer at export needs to know where it was.
+        let tracking = CursorTracker::available();
+        let cursor = match args.export.cursor_mode() {
+            Some(CursorMode::Drawn) if !tracking => {
+                eprintln!("warning: cursor tracking unavailable; recording the system pointer");
+                CursorMode::Os
+            }
+            Some(mode) => mode,
+            None if tracking => CursorMode::Drawn,
+            None => CursorMode::Os,
+        };
+
         let engine = args.engine();
         let raw_ext = format!("raw.{}", engine.raw_extension());
         let raw = if args.keep_raw {
@@ -681,15 +745,17 @@ impl Session {
             display: args.display.clone(),
             max_duration: args.duration.map(Duration::from_secs_f64),
             engine,
-            draw_cursor: !args.no_cursor,
+            draw_cursor: cursor == CursorMode::Os,
             ..RecordOptions::new(&raw)
         };
 
         let recording = Recording::start(&opts)?;
-        let tracker = if args.export.needs_cursor() {
+        let tracker = if args.export.needs_cursor() || cursor == CursorMode::Drawn {
             let t = CursorTracker::start(recording.started(), region);
             if t.is_none() {
-                eprintln!("warning: cursor tracking unavailable; exporting without zoom/clicks");
+                eprintln!(
+                    "warning: cursor tracking unavailable; exporting without zoom/clicks/pointer"
+                );
             }
             t
         } else {
@@ -704,6 +770,7 @@ impl Session {
             args,
             output,
             format,
+            cursor,
         })
     }
 
@@ -733,6 +800,11 @@ impl Session {
         let args = &self.args;
         let secs = self.recording.elapsed().as_secs_f64();
         let mut track = self.tracker.map(CursorTracker::finish);
+        let drawn = self.cursor == CursorMode::Drawn;
+        if let Some(t) = &mut track {
+            // So `bv export` knows to draw it again.
+            t.draw_pointer = drawn;
+        }
         let recorded = self.recording.stop()?;
         let recorded_stats = recorded.stats;
         let raw = recorded.path;
@@ -767,6 +839,7 @@ impl Session {
         }
 
         let mut eopts = args.export.options(raw.clone(), self.output, self.format);
+        eopts.pointer = drawn.then(|| args.export.pointer_style());
         eopts.cursor = track;
         let export_started = Instant::now();
         let result = export(&eopts);
@@ -814,15 +887,37 @@ fn export_cmd(args: ExportCmd) -> Result<()> {
         stem.with_extension("").with_extension(format.extension())
     });
     let mut opts = args.export.options(args.input.clone(), output, format);
-    if args.export.needs_cursor() {
-        let path = args
-            .cursor
-            .clone()
-            .unwrap_or_else(|| cursor_sidecar(&args.input));
+    let mode = args.export.cursor_mode();
+    let path = args
+        .track
+        .clone()
+        .unwrap_or_else(|| cursor_sidecar(&args.input));
+    let required = args.export.needs_cursor() || mode == Some(CursorMode::Drawn);
+    if required || args.track.is_some() || path.exists() {
         opts.cursor = Some(CursorTrack::load(&path).with_context(|| {
-            "zoom/clicks need a cursor track; pass --cursor or record with --keep-raw"
+            "zoom/clicks/--cursor drawn need a cursor track; pass --track or record with --keep-raw"
         })?);
     }
+    // The recording has the system pointer in it unless it was made to
+    // have one drawn (or none).
+    let recorded_drawn = opts.cursor.as_ref().is_some_and(|t| t.draw_pointer);
+    let draw = match mode {
+        None => recorded_drawn,
+        Some(CursorMode::Drawn) => {
+            if !recorded_drawn {
+                eprintln!("note: if this recording shows the system pointer, it will show twice");
+            }
+            true
+        }
+        Some(CursorMode::Os) => {
+            if recorded_drawn {
+                eprintln!("note: this recording has no system pointer; --cursor os shows none");
+            }
+            false
+        }
+        Some(CursorMode::None) => false,
+    };
+    opts.pointer = draw.then(|| args.export.pointer_style());
     report(&export(&opts)?, args.export.copy, args.export.json);
     Ok(())
 }
@@ -862,8 +957,8 @@ fn doctor() -> Result<()> {
     }
     let cursor = CursorTracker::start(Instant::now(), None).map(CursorTracker::finish);
     match cursor {
-        Some(_) => println!("✓ cursor tracking available (zoom supported)"),
-        None => println!("✗ cursor tracking unavailable (zoom disabled)"),
+        Some(_) => println!("✓ cursor tracking available (zoom, clicks, drawn pointer)"),
+        None => println!("✗ cursor tracking unavailable (no zoom/clicks; system pointer)"),
     }
     println!("  platform: {:?}", ffmpeg::Platform::current());
     println!("  network: none (bv never connects anywhere; everything stays on this machine)");
