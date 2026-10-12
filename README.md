@@ -10,6 +10,7 @@ bv record demo.mp4 -z     # MP4, zooms in around each click
 bv record --zoom-follow   # stay zoomed and follow the cursor
 bv record --clicks        # draw a ring wherever you click
 bv record -c              # copy the result to the clipboard
+bv record -s              # pick a screen or drag out an area first (Windows)
 bv record -d 10 --region 1280x720+0+0 --width 960
 bv hotkey --dir ~/Videos  # Ctrl+Alt+R starts/stops; each clip is copied
 bv tray                   # same, from a menu bar / tray icon
@@ -41,7 +42,9 @@ bv doctor                 # checks ffmpeg + cursor tracking
 | `bv monitors` | List connected monitors (Windows) with the number to pass to `--monitor`. |
 | `bv doctor` | Check dependencies. |
 
-**Multiple monitors:** on Windows, `record`, `hotkey` and `tray` capture the
+**Choosing what to record:** `-s/--select` dims every screen before recording:
+click a screen to record all of it, or drag out an area. Esc cancels. Without
+it, `record`, `hotkey` and `tray` capture the
 primary monitor by default. Pick another with `-m 2` (numbers from
 `bv monitors`, left to right) or record everything with `-m all`. `--region`
 offsets may be negative for screens left of or above the primary one, e.g.
@@ -101,7 +104,7 @@ clipboard.
 
 - [x] Global hotkey to start/stop (`bv hotkey`)
 - [x] Menu bar / tray app (`bv tray`)
-- [ ] Drag-to-select capture region
+- [x] Drag-to-select capture region (`--select`, Windows)
 - [x] Copy the output file to the clipboard after export
 - [x] Trim start/end before export
 - [x] Align cursor timestamps with ffmpeg's first frame

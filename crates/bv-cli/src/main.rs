@@ -3,6 +3,7 @@ mod hotkey;
 mod tracker;
 #[cfg(feature = "tray")]
 mod tray;
+mod ui;
 
 use std::{
     io::{self, BufRead, IsTerminal},
@@ -86,6 +87,10 @@ struct CaptureArgs {
     /// [default on Windows: primary].
     #[arg(long, short = 'm')]
     monitor: Option<MonitorChoice>,
+    /// Before each recording, dim the screens and click one or drag out an
+    /// area to record (Windows).
+    #[arg(long, short = 's', conflicts_with_all = ["region", "monitor"])]
+    select: bool,
     /// Screen to capture with the ffmpeg engine (X11 display, avfoundation
     /// device or gdigrab target).
     #[arg(long)]
@@ -298,7 +303,13 @@ fn record(args: RecordArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| default_output(format));
     let stop = stop_signal(true)?;
-    let mut session = Session::start(&args.capture, output, format)?;
+    let mut session = match Session::start(&args.capture, output, format) {
+        Err(e) if e.is::<ui::Cancelled>() => {
+            eprintln!("Cancelled.");
+            return Ok(());
+        }
+        r => r?,
+    };
     eprintln!("● Recording… press Enter or Ctrl+C to stop");
     while !stop.load(Ordering::Relaxed) && !session.finished() {
         thread::sleep(Duration::from_millis(50));
@@ -333,6 +344,7 @@ fn hotkey_mode(mut args: HotkeyArgs) -> Result<()> {
                         eprintln!("● Recording… press {} to stop", args.key);
                         session = Some(s);
                     }
+                    Err(e) if e.is::<ui::Cancelled>() => {}
                     Err(e) => eprintln!("error: {e:#}"),
                 }
             }
@@ -377,7 +389,11 @@ impl Session {
                     .context("bad output path")?,
             )
         };
-        let region = args.capture_region()?;
+        let region = if args.select {
+            Some(ui::pick_region()?.ok_or(ui::Cancelled)?)
+        } else {
+            args.capture_region()?
+        };
         let opts = RecordOptions {
             fps: args.capture_fps(engine, format),
             region,
