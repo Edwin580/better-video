@@ -302,8 +302,8 @@ per frame (a pure function of time, clamped to the screen), and `render` crops +
 The pointer is then drawn from the track: a spring-smoothed path (pulled back
 onto the recorded one around each click, snapping once settled) and a
 signed-distance arrow, anti-aliased, mapped through the zoom viewport like
-click rings. The native exporter only redraws the rows where the pointer was
-and is, so a still pointer leaves frames identical.
+click rings. The native exporter only redraws the rows where the pointer and
+click rings were and are, so a still pointer leaves frames identical.
 With `--style`, the background and shadow are drawn once and each frame's
 changed rows are copied into the frame with anti-aliased corners, so
 everything outside the recording is byte-identical from frame to frame (the
