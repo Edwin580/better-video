@@ -162,12 +162,43 @@ struct ExportArgs {
     /// Zoom magnification.
     #[arg(long, default_value_t = 2.0)]
     zoom_level: f64,
+    /// What makes the camera zoom in: `click`, `hover` (where the cursor
+    /// rests), `click-or-hover`, or `follow` (always zoomed, panning with
+    /// the cursor). Implies zoom.
+    #[arg(long, value_enum, value_name = "TRIGGER")]
+    zoom_on: Option<ZoomOn>,
+    /// Seconds to stay zoomed after a click or once the cursor moves on.
+    #[arg(long, default_value_t = 1.5, value_name = "SECS")]
+    zoom_hold: f64,
+    /// Roughly how long the camera takes to settle, in seconds. Larger is
+    /// smoother and slower.
+    #[arg(long, default_value_t = 0.8, value_name = "SECS")]
+    zoom_smooth: f64,
     /// Seconds to cut from the start (e.g. reaching for the mouse).
     #[arg(long, default_value_t = 0.0, value_name = "SECS")]
     trim_start: f64,
     /// Seconds to cut from the end (e.g. pressing the stop key).
     #[arg(long, default_value_t = 0.0, value_name = "SECS")]
     trim_end: f64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ZoomOn {
+    Click,
+    Hover,
+    ClickOrHover,
+    Follow,
+}
+
+impl From<ZoomOn> for ZoomTrigger {
+    fn from(z: ZoomOn) -> Self {
+        match z {
+            ZoomOn::Click => ZoomTrigger::Click,
+            ZoomOn::Hover => ZoomTrigger::Hover,
+            ZoomOn::ClickOrHover => ZoomTrigger::ClickOrHover,
+            ZoomOn::Follow => ZoomTrigger::Follow,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -214,14 +245,20 @@ impl ExportArgs {
             .unwrap_or(OutputFormat::Gif)
     }
 
+    /// `--zoom-on`, else `--zoom-follow`, else `-z` (click).
+    fn trigger(&self) -> Option<ZoomTrigger> {
+        self.zoom_on
+            .map(Into::into)
+            .or(self.zoom_follow.then_some(ZoomTrigger::Follow))
+            .or(self.zoom.then_some(ZoomTrigger::Click))
+    }
+
     fn zoom(&self) -> Option<ZoomConfig> {
-        (self.zoom || self.zoom_follow).then(|| ZoomConfig {
+        self.trigger().map(|trigger| ZoomConfig {
             level: self.zoom_level,
-            trigger: if self.zoom_follow {
-                ZoomTrigger::Always
-            } else {
-                ZoomTrigger::Click
-            },
+            trigger,
+            hold_secs: self.zoom_hold.max(0.0),
+            smoothing_secs: self.zoom_smooth.max(0.05),
             ..ZoomConfig::default()
         })
     }
@@ -232,7 +269,7 @@ impl ExportArgs {
             format,
             quality: ui::Quality::from_width(self.width),
             clicks: self.clicks,
-            zoom: self.zoom || self.zoom_follow,
+            zoom: ui::ZoomMode::from_trigger(self.trigger()),
         }
     }
 
@@ -243,12 +280,14 @@ impl ExportArgs {
         self.width = c.quality.width();
         self.fps = Some(c.quality.fps());
         self.clicks = c.clicks;
-        if !c.zoom {
-            self.zoom = false;
-            self.zoom_follow = false;
-        } else if !self.zoom_follow {
-            self.zoom = true;
-        }
+        self.zoom = false;
+        self.zoom_follow = false;
+        self.zoom_on = c.zoom.trigger().map(|t| match t {
+            ZoomTrigger::Click => ZoomOn::Click,
+            ZoomTrigger::Hover => ZoomOn::Hover,
+            ZoomTrigger::ClickOrHover => ZoomOn::ClickOrHover,
+            ZoomTrigger::Follow => ZoomOn::Follow,
+        });
     }
 
     fn fps(&self, format: OutputFormat) -> u32 {
@@ -354,7 +393,11 @@ fn record(args: RecordArgs) -> Result<()> {
     while !stop.load(Ordering::Relaxed) && !session.finished() {
         thread::sleep(Duration::from_millis(50));
     }
-    session.finish().map(drop)
+    match session.finish() {
+        // Discarded from the recording pill.
+        Err(e) if e.is::<ui::Cancelled>() => Ok(()),
+        r => r.map(drop),
+    }
 }
 
 fn hotkey_mode(mut args: HotkeyArgs) -> Result<()> {
@@ -390,8 +433,11 @@ fn hotkey_mode(mut args: HotkeyArgs) -> Result<()> {
             }
             Some(_) if pressed || quitting || ended => {
                 if let Some(s) = session.take() {
-                    if let Err(e) = s.finish() {
-                        eprintln!("error: {e:#}");
+                    match s.finish() {
+                        // Discarded from the recording pill.
+                        Err(e) if e.is::<ui::Cancelled>() => {}
+                        Err(e) => eprintln!("error: {e:#}"),
+                        Ok(_) => {}
                     }
                 }
                 if quitting {
@@ -492,9 +538,14 @@ impl Session {
     }
 
     /// True once the duration limit passed, capture stopped by itself, or
-    /// the on-screen Stop button was clicked.
+    /// Stop or Discard was clicked on the pill.
     fn finished(&mut self) -> bool {
-        self.recording.finished() || self.indicator.as_ref().is_some_and(|i| i.stop_requested())
+        self.recording.finished()
+            || self
+                .indicator
+                .as_ref()
+                .and_then(|i| i.requested())
+                .is_some()
     }
 
     /// What was chosen in the area picker, if it was shown.
@@ -505,6 +556,8 @@ impl Session {
 
     /// Stop recording, export, and report the result.
     fn finish(mut self) -> Result<PathBuf> {
+        let discard =
+            self.indicator.as_ref().and_then(|i| i.requested()) == Some(ui::StopRequest::Discard);
         // Close the on-screen frame right away.
         self.indicator = None;
         let args = &self.args;
@@ -514,6 +567,11 @@ impl Session {
         let raw = recorded.path;
         if let Some(t) = &mut track {
             t.shift_earlier(recorded.first_frame_delay);
+        }
+        if discard {
+            let _ = std::fs::remove_file(&raw);
+            eprintln!("■ Discarded");
+            return Err(ui::Cancelled.into());
         }
         eprintln!("■ Stopped after {secs:.1}s, exporting…");
 

@@ -7,7 +7,7 @@ MP4 you can drop straight into a PR body**, optionally with a camera that
 ```sh
 bv record                 # record until Enter / Ctrl+C → ./bv-2026-10-11_15-48-12.gif
 bv record demo.mp4 -z     # MP4, zooms in around each click
-bv record --zoom-follow   # stay zoomed and follow the cursor
+bv record --zoom-on hover # zoom where the cursor rests (also click, follow)
 bv record --clicks        # draw a ring wherever you click
 bv record -c              # copy the result to the clipboard
 bv record -s              # pick a screen or drag out an area first (Windows)
@@ -24,14 +24,19 @@ bv tray
 ```
 
 1. A notification confirms better-video is running. Its icon is in the
-   taskbar tray (click **^** if it's hidden).
+   taskbar tray, but Windows 11 hides new tray icons: if you don't see it
+   (or a **^** leading to it), turn it on in **Settings › Personalization ›
+   Taskbar › Other system tray icons**. The hotkey works either way.
 2. **Click the icon** or press **Ctrl+Alt+R**. The screens dim: click a screen
-   to record all of it, or drag around the part you want.
-3. In the bar under your selection, pick **GIF** or **MP4** and a size
-   (**Small** is 640 px at 10 fps, the right size for a PR), then **Record**.
+   to record all of it, or drag around the part you want. Drag the handles to
+   resize, or inside the selection to move it.
+3. In the bar under your selection, pick **GIF** or **MP4**, a size
+   (**Small** is 640 px at 10 fps, the right size for a PR), and optionally
+   **Show clicks** and a **Zoom** mode, then **Record** (or press Enter).
    A 3-2-1 countdown starts.
 4. A red frame shows what's being recorded (it doesn't appear in the video).
-   Click **Stop** under it, click the tray icon, or press Ctrl+Alt+R again.
+   Click **Stop** in the pill under it, click the tray icon, or press
+   Ctrl+Alt+R again. **Discard** throws the take away.
 5. A notification shows the file name and size. The file is saved in
    **Videos\better-video** and copied to the clipboard, ready to paste into a
    PR. Click the notification to show it in Explorer.
@@ -67,12 +72,14 @@ bv doctor                 # checks ffmpeg + cursor tracking
 | `bv doctor` | Check dependencies. |
 
 **Choosing what to record:** `-s/--select` dims every screen before recording:
-click a screen to record all of it, or drag out an area (Esc cancels). A bar under the
-selection sets the format (GIF/MP4), size (Small 640px @ 10 fps, Medium 960px @
-12 fps, Large 1280px @ 15 fps), click rings and zoom, and shows where the file
-will be saved; Record starts a 3-second countdown (`--countdown 0` skips it).
-While recording, a red frame marks the area with a Stop button under it; both
-are hidden from the recording itself (Windows 10 2004 or later).
+click a screen to record all of it, or drag out an area (Esc cancels), then
+resize it with the handles or drag it around. A bar under the selection sets
+the format (GIF/MP4), size (Small 640px @ 10 fps, Medium 960px @ 12 fps,
+Large 1280px @ 15 fps), click rings and zoom (Off / Click / Hover / Follow),
+and shows where the file will be saved; Record starts a 3-second countdown
+(`--countdown 0` skips it). While recording, a red frame marks the area and a
+pill under it shows the time with Stop and Discard; all of it is hidden from
+the recording itself (Windows 10 2004 or later).
 
 Without `--select`, `record`, `hotkey` and `tray` capture the primary monitor
 by default. Pick another with `-m 2` (numbers from
@@ -80,7 +87,16 @@ by default. Pick another with `-m 2` (numbers from
 offsets may be negative for screens left of or above the primary one, e.g.
 `--region 1920x1080-1920+0`.
 
-Useful flags: `-z/--zoom`, `--zoom-follow`, `--zoom-level 2.5`, `-w/--width 960`,
+**Zoom:** the camera eases in and out on springs (no snapping) and only pans
+when the cursor nears the edge of the zoomed view. It zooms in on each click
+(`click`), where the cursor comes to rest (`hover`), either
+(`click-or-hover`), or stays zoomed and follows the cursor (`follow`).
+`--zoom-smooth` sets roughly how long it takes to settle (default 0.8 s) and
+`--zoom-hold` how long it stays in. The `--select` bar offers Off / Click /
+Hover / Follow.
+
+Useful flags: `-z/--zoom`, `--zoom-on click|hover|click-or-hover|follow`,
+`--zoom-level 2.5`, `--zoom-smooth 1.2`, `--zoom-hold 2`, `-w/--width 960`,
 `--fps 10`, `-d/--duration 15`, `-m/--monitor 2`, `--region WxH+X+Y`,
 `--trim-start 0.5`, `--trim-end 1`.
 
@@ -147,4 +163,5 @@ clipboard.
       duplication on Windows for high frame rates
 - [ ] Optional [gifski](https://gif.ski) encoder for higher-quality GIFs
 - [x] Click highlight rings
+- [x] Smooth, spring-based zoom with click / hover / follow triggers
 - [ ] Keystroke overlay

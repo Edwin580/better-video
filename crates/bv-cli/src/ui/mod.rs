@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use bv_core::{CaptureRegion, OutputFormat};
+use bv_core::{zoom::ZoomTrigger, CaptureRegion, OutputFormat};
 use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
@@ -73,13 +73,84 @@ impl Quality {
     }
 }
 
+/// Zoom choices offered in the options bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ZoomMode {
+    Off,
+    Click,
+    Hover,
+    Follow,
+}
+
+impl ZoomMode {
+    pub const ALL: [ZoomMode; 4] = [
+        ZoomMode::Off,
+        ZoomMode::Click,
+        ZoomMode::Hover,
+        ZoomMode::Follow,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ZoomMode::Off => "Off",
+            ZoomMode::Click => "Click",
+            ZoomMode::Hover => "Hover",
+            ZoomMode::Follow => "Follow",
+        }
+    }
+
+    pub fn trigger(self) -> Option<ZoomTrigger> {
+        match self {
+            ZoomMode::Off => None,
+            ZoomMode::Click => Some(ZoomTrigger::Click),
+            ZoomMode::Hover => Some(ZoomTrigger::Hover),
+            ZoomMode::Follow => Some(ZoomTrigger::Follow),
+        }
+    }
+
+    pub fn from_trigger(t: Option<ZoomTrigger>) -> Self {
+        match t {
+            None => ZoomMode::Off,
+            Some(ZoomTrigger::Click) => ZoomMode::Click,
+            Some(ZoomTrigger::Hover | ZoomTrigger::ClickOrHover) => ZoomMode::Hover,
+            Some(ZoomTrigger::Follow) => ZoomMode::Follow,
+        }
+    }
+}
+
+/// Also reads settings saved when zoom was an on/off switch.
+impl<'de> Deserialize<'de> for ZoomMode {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Switch(bool),
+            Name(String),
+        }
+        Ok(match Raw::deserialize(d)? {
+            Raw::Switch(on) => {
+                if on {
+                    ZoomMode::Click
+                } else {
+                    ZoomMode::Off
+                }
+            }
+            Raw::Name(n) => ZoomMode::ALL
+                .into_iter()
+                .find(|m| m.label().eq_ignore_ascii_case(&n))
+                .ok_or_else(|| serde::de::Error::custom(format!("unknown zoom mode {n:?}")))?,
+        })
+    }
+}
+
 /// What the options bar lets the user change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Choices {
     pub format: OutputFormat,
     pub quality: Quality,
     pub clicks: bool,
-    pub zoom: bool,
+    pub zoom: ZoomMode,
 }
 
 pub struct PickRequest {
@@ -118,8 +189,17 @@ pub fn pick(_req: PickRequest) -> Result<Option<Picked>> {
     anyhow::bail!("--select is only available on Windows so far; use --region or --monitor")
 }
 
-/// A frame around the area being recorded with a Stop button, hidden from
-/// the recording itself. Closes when dropped.
+/// What the recording pill asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopRequest {
+    /// Stop and save the clip.
+    Save,
+    /// Stop and throw the clip away.
+    Discard,
+}
+
+/// A frame around the area being recorded, with a pill holding Stop and
+/// Discard; hidden from the recording itself. Closes when dropped.
 pub struct Indicator {
     #[cfg(windows)]
     inner: win::indicator::Indicator,
@@ -139,28 +219,37 @@ impl Indicator {
         }
     }
 
-    /// Whether the Stop button was clicked.
-    pub fn stop_requested(&self) -> bool {
+    /// Whether Stop or Discard was clicked on the pill.
+    pub fn requested(&self) -> Option<StopRequest> {
         #[cfg(windows)]
         {
-            self.inner.stop_requested()
+            self.inner.requested()
         }
         #[cfg(not(windows))]
         {
-            false
+            None
         }
     }
+}
+
+/// Sets a notification's icon.
+#[cfg(feature = "tray")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastKind {
+    Info,
+    Saved,
+    Error,
 }
 
 /// A notification in the corner of the main screen; clicking it shows
 /// `reveal` in the file manager. Doesn't block.
 #[cfg(feature = "tray")]
-pub fn toast(title: &str, body: &str, reveal: Option<PathBuf>) {
+pub fn toast(kind: ToastKind, title: &str, body: &str, reveal: Option<PathBuf>) {
     #[cfg(windows)]
-    win::toast::show(title.to_owned(), body.to_owned(), reveal);
+    win::toast::show(kind, title.to_owned(), body.to_owned(), reveal);
     #[cfg(not(windows))]
     {
-        let _ = reveal;
+        let _ = (kind, reveal);
         eprintln!("{title} — {body}");
     }
 }

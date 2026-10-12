@@ -7,6 +7,7 @@
 pub mod canvas;
 pub mod indicator;
 pub mod picker;
+pub mod theme;
 #[cfg(feature = "tray")]
 pub mod toast;
 
@@ -22,6 +23,10 @@ use windows_sys::Win32::{
         WM_DESTROY, WM_NCCREATE, WM_NCDESTROY, WNDCLASSEXW,
     },
 };
+
+/// Sent after `TrackMouseEvent(TME_LEAVE)` when the mouse leaves (it lives
+/// in the Controls feature of windows-sys, not worth pulling in for this).
+pub const WM_MOUSELEAVE: u32 = 0x02A3;
 
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
