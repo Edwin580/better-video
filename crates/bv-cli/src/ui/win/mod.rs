@@ -7,6 +7,8 @@
 pub mod canvas;
 pub mod indicator;
 pub mod picker;
+#[cfg(feature = "tray")]
+pub mod toast;
 
 use std::{cell::Cell, ptr};
 

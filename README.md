@@ -5,7 +5,7 @@ MP4 you can drop straight into a PR body**, optionally with a camera that
 **zooms in on your cursor** so reviewers can actually see what you clicked.
 
 ```sh
-bv record                 # record until Enter / Ctrl+C → ./bv-<ts>.gif
+bv record                 # record until Enter / Ctrl+C → ./bv-2026-10-11_15-48-12.gif
 bv record demo.mp4 -z     # MP4, zooms in around each click
 bv record --zoom-follow   # stay zoomed and follow the cursor
 bv record --clicks        # draw a ring wherever you click
@@ -15,6 +15,30 @@ bv record -d 10 --region 1280x720+0+0 --width 960
 bv hotkey --dir ~/Videos  # Ctrl+Alt+R starts/stops; each clip is copied
 bv tray                   # same, from a menu bar / tray icon
 ```
+
+## Quick start (Windows)
+
+```sh
+cargo install --path crates/bv-cli --features tray
+bv tray
+```
+
+1. A notification confirms better-video is running. Its icon is in the
+   taskbar tray (click **^** if it's hidden).
+2. **Click the icon** or press **Ctrl+Alt+R**. The screens dim: click a screen
+   to record all of it, or drag around the part you want.
+3. In the bar under your selection, pick **GIF** or **MP4** and a size
+   (**Small** is 640 px at 10 fps, the right size for a PR), then **Record**.
+   A 3-2-1 countdown starts.
+4. A red frame shows what's being recorded (it doesn't appear in the video).
+   Click **Stop** under it, click the tray icon, or press Ctrl+Alt+R again.
+5. A notification shows the file name and size. The file is saved in
+   **Videos\better-video** and copied to the clipboard, ready to paste into a
+   PR. Click the notification to show it in Explorer.
+
+Right-click the tray icon to record the same area again, open the last
+recording, see or change the save folder, or turn off clipboard copy. Your
+choices are remembered in `%APPDATA%\better-video\settings.json`.
 
 ## Install (from source)
 
@@ -37,7 +61,7 @@ bv doctor                 # checks ffmpeg + cursor tracking
 | --- | --- |
 | `bv record [OUT]` | Record the screen, export when you stop. Format comes from `--format`, `--gif`, or the file extension (default GIF). |
 | `bv hotkey` | Run in the background. `--key` (default `ctrl+alt+r`) starts and stops a recording; each one is exported to `--dir` and copied to the clipboard. Takes the same capture/export flags as `record`. macOS needs Input Monitoring permission. |
-| `bv tray` | Menu bar (macOS) / tray (Windows, Linux) icon: start/stop recording, toggle zoom, click rings and clipboard copy, pick GIF/MP4/WebM, open the last clip. The hotkey works here too. Saves to `~/Movies/better-video` (macOS) or `~/Videos/better-video`. Build with `--features tray`. |
+| `bv tray` | Tray (Windows, Linux) / menu bar (macOS) icon. On Windows, click it (or press the hotkey) to pick an area and options, then record; right-click for the menu: record the same area again, open or show the last clip, the save folder (shown in the menu, changeable), clipboard copy. Elsewhere the menu starts/stops recording the primary screen. Saves to `~/Videos/better-video` (`~/Movies` on macOS) unless `--dir` is set; a notification shows each saved file. Build with `--features tray`. |
 | `bv export RAW` | Re-export a raw recording (`bv record --keep-raw`) with different settings, e.g. try zoom on/off without re-recording. |
 | `bv monitors` | List connected monitors (Windows) with the number to pass to `--monitor`. |
 | `bv doctor` | Check dependencies. |
