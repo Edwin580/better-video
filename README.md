@@ -37,10 +37,17 @@ bv doctor                 # checks ffmpeg + cursor tracking
 | `bv hotkey` | Run in the background. `--key` (default `ctrl+alt+r`) starts and stops a recording; each one is exported to `--dir` and copied to the clipboard. Takes the same capture/export flags as `record`. macOS needs Input Monitoring permission. |
 | `bv tray` | Menu bar (macOS) / tray (Windows, Linux) icon: start/stop recording, toggle zoom, click rings and clipboard copy, pick GIF/MP4/WebM, open the last clip. The hotkey works here too. Saves to `~/Movies/better-video` (macOS) or `~/Videos/better-video`. Build with `--features tray`. |
 | `bv export RAW` | Re-export a raw recording (`bv record --keep-raw`) with different settings, e.g. try zoom on/off without re-recording. |
+| `bv monitors` | List connected monitors (Windows) with the number to pass to `--monitor`. |
 | `bv doctor` | Check dependencies. |
 
+**Multiple monitors:** on Windows, `record`, `hotkey` and `tray` capture the
+primary monitor by default. Pick another with `-m 2` (numbers from
+`bv monitors`, left to right) or record everything with `-m all`. `--region`
+offsets may be negative for screens left of or above the primary one, e.g.
+`--region 1920x1080-1920+0`.
+
 Useful flags: `-z/--zoom`, `--zoom-follow`, `--zoom-level 2.5`, `-w/--width 960`,
-`--fps 10`, `-d/--duration 15`, `--region WxH+X+Y`,
+`--fps 10`, `-d/--duration 15`, `-m/--monitor 2`, `--region WxH+X+Y`,
 `--trim-start 0.5`, `--trim-end 1`.
 
 **Size tips:** GitHub caps PR attachments at 10 MB. MP4 is usually 3–10×
@@ -77,7 +84,9 @@ clipboard.
 - [x] Copy the output file to the clipboard after export
 - [x] Trim start/end before export
 - [x] Align cursor timestamps with ffmpeg's first frame
-- [ ] HiDPI: map cursor points → capture pixels on macOS/Windows scaling
+- [ ] HiDPI: map cursor points → capture pixels on macOS scaling (Windows
+      runs per-monitor DPI aware, so everything is in physical pixels)
+- [x] Record one monitor at a time on Windows (`--monitor`)
 - [ ] Wayland capture (xdg-desktop-portal + PipeWire)
 - [ ] Native capture backends (ScreenCaptureKit, DXGI) to drop the ffmpeg
       runtime dependency, or ship ffmpeg as a sidecar
