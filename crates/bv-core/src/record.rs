@@ -219,6 +219,27 @@ impl Recording {
     }
 }
 
+/// Which native capture backend works for `region` on this machine
+/// (`"dxgi"` or `"gdi"`), for `bv doctor`.
+pub fn probe_capture(region: CaptureRegion) -> Result<&'static str> {
+    let area = Area {
+        x: region.x,
+        y: region.y,
+        width: region.width,
+        height: region.height,
+    };
+    let capture = bv_engine::capture::ScreenCapture::new(area, false)?;
+    Ok(capture.backend())
+}
+
+/// Whether the built-in MP4 encoder (Windows Media Foundation) works here.
+pub fn builtin_mp4() -> bool {
+    let probe = std::env::temp_dir().join(format!("bv-probe-{}.mp4", std::process::id()));
+    let ok = bv_engine::Mp4Encoder::create(&probe, 64, 64, 10).is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
 fn start_ffmpeg(opts: &RecordOptions) -> Result<Child> {
     let platform = Platform::current();
     let mut cmd = std::process::Command::new(ffmpeg::ffmpeg_bin());

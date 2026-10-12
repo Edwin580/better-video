@@ -15,11 +15,13 @@
 pub mod capture;
 pub mod gif;
 pub mod lzw;
+pub mod mp4;
 pub mod quant;
 pub mod raw;
 pub mod recorder;
 
 pub use gif::GifEncoder;
+pub use mp4::Mp4Encoder;
 pub use quant::{Palette, PaletteBuilder};
 pub use raw::{RawReader, RawWriter};
 pub use recorder::{Recorder, RecorderStats};
