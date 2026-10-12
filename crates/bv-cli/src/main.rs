@@ -341,7 +341,7 @@ fn record(args: RecordArgs) -> Result<()> {
     let output = args
         .output
         .clone()
-        .unwrap_or_else(|| default_output(format));
+        .unwrap_or_else(|| fresh_output(Path::new(""), format));
     let stop = stop_signal(true)?;
     let mut session = match Session::start(&args.capture, output, format) {
         Err(e) if e.is::<ui::Cancelled>() => {
@@ -378,7 +378,7 @@ fn hotkey_mode(mut args: HotkeyArgs) -> Result<()> {
         match &session {
             None if quitting => return Ok(()),
             None if pressed => {
-                let output = dir.join(default_output(format));
+                let output = fresh_output(&dir, format);
                 match Session::start(&args.capture, output, format) {
                     Ok(s) => {
                         eprintln!("● Recording… press {} to stop", args.key);
@@ -597,6 +597,22 @@ fn stop_signal(enter: bool) -> Result<Arc<AtomicBool>> {
     Ok(stop)
 }
 
+/// A new file in `dir` named after the current time, with `-2`, `-3`, …
+/// added if a recording from the same second already exists.
+fn fresh_output(dir: &Path, format: OutputFormat) -> PathBuf {
+    let first = dir.join(default_output(format));
+    let stem = first.with_extension("");
+    let numbered = |n: u32| {
+        let mut name = stem.clone().into_os_string();
+        name.push(format!("-{n}.{}", format.extension()));
+        PathBuf::from(name)
+    };
+    std::iter::once(first.clone())
+        .chain((2..).map(numbered))
+        .find(|p| !p.exists())
+        .unwrap_or(first)
+}
+
 /// `bv-2026-10-11_15-48-12.gif`: local time on Windows, UTC elsewhere.
 fn default_output(format: OutputFormat) -> PathBuf {
     let (y, mo, d, h, mi, s) = now();
@@ -689,6 +705,18 @@ mod tests {
         assert_eq!(human_size(1000), "1 KB");
         assert_eq!(human_size(421_000), "412 KB");
         assert_eq!(human_size(3_565_158), "3.4 MB");
+    }
+
+    #[test]
+    fn fresh_output_never_overwrites() {
+        let dir = std::env::temp_dir().join(format!("bv-fresh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = fresh_output(&dir, OutputFormat::Gif);
+        std::fs::write(&a, b"x").unwrap();
+        let b = fresh_output(&dir, OutputFormat::Gif);
+        assert_ne!(a, b);
+        assert!(!b.exists());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
