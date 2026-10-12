@@ -152,7 +152,7 @@ in the `--select` bar):
 | Mode | Zooms in when… | Aims at | Zooms back out when… |
 |---|---|---|---|
 | `click` (`-z`, bar: **Click**) | a mouse button goes down. The zoom starts 0.4 s before the press. | the click point | 1.5 s after the last click (`--zoom-hold`) with no new click |
-| `hover` (bar: **Hover**) | the cursor stays within about 1% of the screen width (19 px on a 1920 px screen) for 0.6 s (`--zoom-dwell`). Where the cursor sits when recording starts doesn't count. | where it rests | 1.5 s after the cursor moves on |
+| `hover` (bar: **Hover**) | the cursor comes to rest: it stays within about 1% of the screen width (19 px on a 1920 px screen) for at least 0.6 s (`--zoom-dwell`). The zoom starts 0.4 s before it stops moving. Where the cursor sits when recording starts doesn't count. | where it rests | 1.5 s after the cursor moves on |
 | `click-or-hover` | either of the above | the click or rest point | 1.5 s after the last of them |
 | `follow` (`--zoom-follow`, bar: **Follow**) | the first frame | the cursor | never; it stays zoomed for the whole clip |
 | off (bar: **Off**) | never | n/a | n/a |
