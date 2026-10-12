@@ -152,33 +152,47 @@ offsets may be negative for screens left of or above the primary one, e.g.
 ### Zoom
 
 Zoom is applied when the clip is exported. Because the whole recording is
-known by then, the camera can start moving *before* a click or pause, so it
-already arrives when the action happens. Pick a mode with `--zoom-on` (or
-in the `--select` bar):
+known by then, it is planned like an editor would cut it, and the camera
+is already in place when the action happens. Pick a mode with `--zoom-on`
+(or in the `--select` bar):
 
-| Mode | Zooms in when… | Aims at | Zooms back out when… |
-|---|---|---|---|
-| `click` (`-z`, bar: **Click**) | a mouse button goes down. The zoom starts 0.4 s before the press. | the click point | 1.5 s after the last click (`--zoom-hold`) with no new click |
-| `hover` (bar: **Hover**) | the cursor comes to rest: it stays within about 1% of the screen width (19 px on a 1920 px screen) for at least 0.6 s (`--zoom-dwell`). The zoom starts 0.4 s before it stops moving. Where the cursor sits when recording starts doesn't count. | where it rests | 1.5 s after the cursor moves on |
-| `click-or-hover` | either of the above | the click or rest point | 1.5 s after the last of them |
-| `follow` (`--zoom-follow`, bar: **Follow**) | the first frame | the cursor | never; it stays zoomed for the whole clip |
-| off (bar: **Off**) | never | n/a | n/a |
+| Mode | Zooms on… | Aims at |
+|---|---|---|
+| `click` (`-z`, bar: **Click**) | mouse presses | the clicks it frames |
+| `hover` (bar: **Hover**) | the cursor coming to rest: it stays within about 1% of the screen width (19 px on a 1920 px screen) for at least 0.6 s (`--zoom-dwell`). Where the cursor sits when recording starts doesn't count. | where it rests |
+| `click-or-hover` | either of the above | the click or rest point |
+| `follow` (`--zoom-follow`, bar: **Follow**) | the whole clip, at `--zoom-level` | the cursor, panning only when it leaves the middle half of the view |
+| off (bar: **Off**) | never | n/a |
 
-In every mode:
+How click and hover zooms are planned:
 
-- **Zooms chain.** If a new click or rest starts less than 0.8 s after the
-  current zoom would end, the camera stays in and glides to the new point
-  instead of zooming out and back in.
-- **The camera holds steady.** While zoomed it pans only when the cursor
-  leaves the middle half of the view, so small movements don't shake the
-  picture.
-- **Motion is smooth.** Zoom and pan use critically damped springs: they
-  speed up and slow down gently, never overshoot, and land exactly, so a
-  still screen gives identical frames.
+- **Clicks share a zoom.** Clicks less than 3 s apart that fit in one view
+  together get one zoom, centred on them and just deep enough to show them
+  all with a 12% margin: the deepest of 1.25x, 1.5x and 1.8x that fits
+  (`--zoom-level` caps it; a deeper level is used only where it fits).
+- **The camera holds still.** While zoomed it doesn't pan between clicks,
+  so still frames are identical (GIFs stay small).
+- **No zoom hides a click.** A zoom is back out before a click outside its
+  view, and comes in only after one.
+- **No yo-yo.** Two zooms have at least 1.5 s of whole screen between
+  them; closer ones merge if they fit together, otherwise the one with
+  fewer clicks is skipped. A zoom that couldn't hold for 1.8 s is skipped.
+- **Wide ends.** The clip opens on the whole screen (no zoom moves in
+  before 2.5 s) and is back out 1 s before the end; a click in the last
+  second is ignored.
+- **Calm motion.** A zoom is fully in 0.5 s before its first click and
+  holds 1.5 s after its last (`--zoom-hold`). Each move takes 0.7 s (to
+  1.25x) to 0.9 s (to 1.8x) on a critically damped spring curve: it
+  starts at rest, never overshoots, lands exactly, and scales in log space
+  so the pace feels even.
 
-Tuning: `--zoom-level 2` (magnification), `--zoom-hold 1.5`,
-`--zoom-dwell 0.6` and `--zoom-smooth 0.8` (roughly how many seconds the
-camera takes to settle; larger is slower and smoother).
+Tuning: `--zoom-level 1.8` (deepest zoom), `--zoom-hold 1.5`,
+`--zoom-dwell 0.6` and `--zoom-smooth 0.8` (pace of camera moves; larger
+is slower).
+
+The planning, easing and follow are ported from
+[OpenScreen](https://github.com/getopenscreen/openscreen) (MIT); see
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ### Styling
 
@@ -232,7 +246,7 @@ pointer can be re-exported with any `--cursor-*` settings, or with
 PATH` names the cursor track if it isn't next to the recording.
 
 Useful flags: `-z/--zoom`, `--zoom-on click|hover|click-or-hover|follow`,
-`--zoom-level 2.5`, `--zoom-smooth 1.2`, `--zoom-hold 2`, `-w/--width 960`,
+`--zoom-level 1.25`, `--zoom-smooth 1.2`, `--zoom-hold 2`, `-w/--width 960`,
 `--fps 10`, `-d/--duration 15`, `-m/--monitor 2`, `--region WxH+X+Y`,
 `--trim-start 0.5`, `--trim-end 1`, `--style clean|gradient|dark`,
 `--cursor drawn|os|none`, `--cursor-size 2`, `--cursor-hide 3`.
@@ -277,8 +291,8 @@ and export time went.
    below, and a second ffmpeg encodes.
 
 Either way a background thread samples the cursor at ~120 Hz into a JSON
-track, `ZoomPlanner` picks a viewport per frame (eased, frame-rate
-independent, clamped to the screen), and `render` crops + scales in one pass.
+track, `ZoomPlanner` plans the zooms from its clicks and picks a viewport
+per frame (a pure function of time, clamped to the screen), and `render` crops + scales in one pass.
 The pointer is then drawn from the track: a spring-smoothed path (pulled back
 onto the recorded one around each click, snapping once settled) and a
 signed-distance arrow, anti-aliased, mapped through the zoom viewport like
@@ -318,4 +332,5 @@ clipboard.
 - [ ] Optional [gifski](https://gif.ski) encoder for higher-quality GIFs
 - [x] Click highlight rings
 - [x] Smooth, spring-based zoom with click / hover / follow triggers
+- [x] Zoom planned like an editor: grouped clicks, fitted depth, no yo-yo
 - [ ] Keystroke overlay

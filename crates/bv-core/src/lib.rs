@@ -6,7 +6,7 @@
 //!    the screen into a fast intermediate (`.bvraw` / `.mkv`) while the
 //!    caller samples the cursor into a [`cursor::CursorTrack`].
 //! 2. **Export** — the intermediate is decoded, optionally run through the
-//!    cursor-following [`zoom::ZoomPlanner`] + [`render`] crop/scale, and
+//!    click-planned [`zoom::ZoomPlanner`] + [`render`] crop/scale, and
 //!    re-encoded into a small GIF / MP4 / WebM suitable for a PR body.
 
 pub mod cursor;
