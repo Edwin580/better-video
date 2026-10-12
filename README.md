@@ -47,18 +47,48 @@ choices are remembered in `%APPDATA%\better-video\settings.json`.
 
 ## Install (from source)
 
-Requirements: Rust (stable) and [`ffmpeg`](https://ffmpeg.org/download.html) on
-your `PATH` (or point `BV_FFMPEG` / `BV_FFPROBE` at it). On Windows, ffmpeg is
-only needed for MP4/WebM: GIFs use the built-in engine. On Linux, cursor zoom
-needs X11 headers (`libx11-dev`), and `--copy` needs `xclip` (X11) or
-`wl-clipboard` (Wayland). The menu bar app on Linux needs `libgtk-3-dev`,
-`libayatana-appindicator3-dev` and `libxdo-dev`.
+Requirements: Rust (stable).
+
+- **Windows:** nothing else. Capture, GIF and MP4 are built in (MP4 uses
+  Windows' own H.264 encoder). [`ffmpeg`](https://ffmpeg.org/download.html)
+  is only needed for WebM, or for MP4 on Windows "N" editions without the
+  Media Feature Pack. No admin rights, no PowerShell, no services.
+- **macOS / Linux:** `ffmpeg` on your `PATH` (or point `BV_FFMPEG` /
+  `BV_FFPROBE` at it). On Linux, cursor zoom needs X11 headers
+  (`libx11-dev`), and `--copy` needs `xclip` (X11) or `wl-clipboard`
+  (Wayland). The menu bar app on Linux needs `libgtk-3-dev`,
+  `libayatana-appindicator3-dev` and `libxdo-dev`.
 
 ```sh
 cargo install --path crates/bv-cli                  # CLI
 cargo install --path crates/bv-cli --features tray  # CLI + menu bar app
-bv doctor                 # checks ffmpeg + cursor tracking
+bv doctor                 # what's available on this machine
 ```
+
+## Privacy and corporate use
+
+better-video is local-only:
+
+- **No network.** It never connects anywhere: no telemetry, no update
+  checks, no uploads. Nothing in its dependencies does networking either.
+  Sharing a clip is up to you (paste it, attach it, `gh` it).
+- **What's recorded:** only the screen or area you choose, and only between
+  start and stop. The mouse pointer is included unless you pass
+  `--no-cursor`. The selection overlay, the red frame, the Stop pill and
+  notifications are excluded from capture, so they never end up in a clip.
+  Nothing records audio, keystrokes or the camera. Click positions are
+  sampled only when click rings or zoom are on, and only to draw them.
+- **Where files go:** the output file you name, or `Videos\better-video`
+  for the tray. While recording, a raw intermediate is kept in
+  `%TEMP%\better-video` and deleted after export; leftovers from a crash
+  are removed after a day. Tray settings live in
+  `%APPDATA%\better-video\settings.json`.
+- **What it runs:** nothing except Explorer (for "Show in folder"), and
+  ffmpeg only if you use the formats that need it. The clipboard and
+  folder picker use Windows APIs directly, so it works where PowerShell is
+  restricted.
+- **Install:** a single per-user `bv.exe`; no installer, admin rights or
+  background service. Quit the tray and delete the file to remove it.
 
 ## Usage
 
@@ -124,8 +154,8 @@ engines; Windows uses the native one by default (`--engine ffmpeg` switches).
    first pass collects colours (an exact palette when the clip uses at most
    255, median cut otherwise) and a second pass encodes with a built-in LZW
    coder: each frame stores only the rectangle that changed, unchanged pixels
-   in it are transparent, and identical frames merge into one. MP4/WebM
-   frames are piped to ffmpeg.
+   in it are transparent, and identical frames merge into one. MP4 goes to
+   Windows' Media Foundation H.264 encoder; WebM frames are piped to ffmpeg.
 
 `BV_CAPTURE=gdi` forces GDI capture; `BV_PROFILE=1` prints where recording
 and export time went.

@@ -115,6 +115,9 @@ struct CaptureArgs {
     /// re-run `bv export` later.
     #[arg(long)]
     keep_raw: bool,
+    /// Leave the mouse pointer out of the recording.
+    #[arg(long)]
+    no_cursor: bool,
     #[command(flatten)]
     export: ExportArgs,
 }
@@ -499,6 +502,7 @@ impl Session {
         } else {
             let dir = std::env::temp_dir().join("better-video");
             std::fs::create_dir_all(&dir)?;
+            clean_stale(&dir);
             dir.join(
                 output
                     .with_extension(&raw_ext)
@@ -512,6 +516,7 @@ impl Session {
             display: args.display.clone(),
             max_duration: args.duration.map(Duration::from_secs_f64),
             engine,
+            draw_cursor: !args.no_cursor,
             ..RecordOptions::new(&raw)
         };
 
@@ -612,6 +617,25 @@ impl Session {
     }
 }
 
+/// Delete leftover recordings in the temp folder from runs that crashed or
+/// were killed before they could clean up. Only files older than a day, so
+/// a recording in progress in another bv is never touched.
+fn clean_stale(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let day = Duration::from_secs(24 * 60 * 60);
+    for entry in entries.flatten() {
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > day));
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// `path` made absolute against the current directory.
 fn absolute(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
@@ -640,13 +664,36 @@ fn export_cmd(args: ExportCmd) -> Result<()> {
 
 fn doctor() -> Result<()> {
     let native = Engine::default_for_platform() == Engine::Native;
+    let mut mp4_native = false;
     if native {
-        println!("✓ native engine: built-in screen capture and GIF encoder");
+        let primary = monitor::monitors()
+            .into_iter()
+            .find(|m| m.primary)
+            .map(|m| m.region);
+        // A small corner of the primary screen is enough to probe.
+        let area = primary.map(|r| CaptureRegion {
+            width: r.width.min(64),
+            height: r.height.min(64),
+            ..r
+        });
+        match area.map(bv_core::record::probe_capture) {
+            Some(Ok(backend)) => println!("✓ screen capture: {backend} (built in)"),
+            Some(Err(e)) => println!("✗ screen capture failed: {e:#}"),
+            None => println!("✗ no monitors found"),
+        }
+        println!("✓ GIF encoder: built in");
+        mp4_native = bv_core::record::builtin_mp4();
+        if mp4_native {
+            println!("✓ MP4 encoder: built in (Windows Media Foundation)");
+        } else {
+            println!("- MP4 encoder: Media Foundation unavailable (Windows N without the Media Feature Pack?); MP4 needs ffmpeg");
+        }
     }
     match ffmpeg::version() {
         Some(v) => println!("✓ {v}"),
-        None if native => println!("- ffmpeg not found — only needed for MP4/WebM"),
-        None => println!("✗ ffmpeg not found — install it or set BV_FFMPEG"),
+        None if native && mp4_native => println!("- ffmpeg not found: only needed for WebM"),
+        None if native => println!("- ffmpeg not found: only needed for MP4/WebM"),
+        None => println!("✗ ffmpeg not found: install it or set BV_FFMPEG"),
     }
     let cursor = CursorTracker::start(Instant::now(), None).map(CursorTracker::finish);
     match cursor {
@@ -654,6 +701,7 @@ fn doctor() -> Result<()> {
         None => println!("✗ cursor tracking unavailable (zoom disabled)"),
     }
     println!("  platform: {:?}", ffmpeg::Platform::current());
+    println!("  network: none (bv never connects anywhere; everything stays on this machine)");
     Ok(())
 }
 

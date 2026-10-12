@@ -5,6 +5,8 @@
 //! [`canvas::Canvas`]; a window's behaviour lives in a [`Handler`].
 
 pub mod canvas;
+#[cfg(feature = "tray")]
+pub mod folder;
 pub mod indicator;
 pub mod picker;
 pub mod theme;
