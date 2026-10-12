@@ -20,5 +20,5 @@ pub mod zoom;
 pub use cursor::{CursorSample, CursorTrack};
 pub use export::{export, ExportOptions, OutputFormat};
 pub use geometry::{Rect, Size};
-pub use record::{CaptureRegion, RecordOptions, Recording};
+pub use record::{CaptureRegion, RecordOptions, Recorded, Recording};
 pub use zoom::{ZoomConfig, ZoomPlanner};

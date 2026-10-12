@@ -4,7 +4,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Child, Stdio},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{bail, Context, Result};
@@ -70,7 +70,19 @@ impl RecordOptions {
 pub struct Recording {
     child: Child,
     started: Instant,
+    started_wall: SystemTime,
+    max_duration: Option<Duration>,
     output: PathBuf,
+}
+
+/// A finished recording.
+#[derive(Debug, Clone)]
+pub struct Recorded {
+    pub path: PathBuf,
+    /// Seconds between [`Recording::started`] and the first captured frame
+    /// (ffmpeg startup latency). Subtract it from cursor timestamps taken
+    /// relative to `started` to line them up with the video. 0 if unknown.
+    pub first_frame_delay: f64,
 }
 
 impl Recording {
@@ -78,11 +90,12 @@ impl Recording {
         let platform = Platform::current();
         let mut cmd = std::process::Command::new(ffmpeg::ffmpeg_bin());
         // stdin stays open: writing "q" is ffmpeg's graceful stop.
+        // Stamp frames with wall-clock time and keep those timestamps in the
+        // file, so we can tell exactly when the first frame was grabbed.
         cmd.args(["-hide_banner", "-loglevel", "error", "-y"])
-            .args(ffmpeg::capture_input_args(platform, opts));
-        if let Some(d) = opts.max_duration {
-            cmd.args(["-t", &format!("{:.3}", d.as_secs_f64())]);
-        }
+            .args(["-use_wallclock_as_timestamps", "1"])
+            .args(ffmpeg::capture_input_args(platform, opts))
+            .arg("-copyts");
         cmd.args(["-vf", &ffmpeg::capture_filter(platform, opts)])
             // Fast, visually lossless intermediate; the export step makes it small.
             .args([
@@ -98,14 +111,24 @@ impl Recording {
             .arg(&opts.output)
             .stdin(Stdio::piped());
 
+        let (started, started_wall) = (Instant::now(), SystemTime::now());
         let child = cmd
             .spawn()
             .context("starting ffmpeg (is it installed and on PATH?)")?;
         Ok(Self {
             child,
-            started: Instant::now(),
+            started,
+            started_wall,
+            // Enforced here rather than with ffmpeg's `-t`, which counts from
+            // timestamp zero and so never stops correctly with `-copyts`.
+            max_duration: opts.max_duration,
             output: opts.output.clone(),
         })
+    }
+
+    /// When ffmpeg was launched; use as the origin for cursor timestamps.
+    pub fn started(&self) -> Instant {
+        self.started
     }
 
     pub fn elapsed(&self) -> Duration {
@@ -116,13 +139,14 @@ impl Recording {
         &self.output
     }
 
-    /// True once ffmpeg exited by itself (duration reached or an error).
+    /// True once `max_duration` has passed or ffmpeg exited by itself.
     pub fn finished(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(Some(_)))
+        self.max_duration.is_some_and(|d| self.elapsed() >= d)
+            || matches!(self.child.try_wait(), Ok(Some(_)))
     }
 
     /// Ask ffmpeg to finish writing and wait for it.
-    pub fn stop(mut self) -> Result<PathBuf> {
+    pub fn stop(mut self) -> Result<Recorded> {
         if let Some(stdin) = self.child.stdin.as_mut() {
             // Ignore errors: ffmpeg may already have exited.
             let _ = stdin.write_all(b"q");
@@ -134,7 +158,29 @@ impl Recording {
         if !status.success() && !self.output.exists() {
             bail!("ffmpeg recording failed ({status})");
         }
-        Ok(self.output)
+        let launched = self
+            .started_wall
+            .duration_since(UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64());
+        let first_frame_delay = ffmpeg::probe(&self.output)
+            .map(|info| first_frame_delay(launched, info.start_time))
+            .unwrap_or(0.0);
+        Ok(Recorded {
+            path: self.output,
+            first_frame_delay,
+        })
+    }
+}
+
+/// Delay between launching ffmpeg and its first frame, given both as Unix
+/// times. Falls back to 0 when the file's timestamps aren't wall-clock
+/// (some capture devices ignore `-use_wallclock_as_timestamps`).
+fn first_frame_delay(launched: f64, first_frame: f64) -> f64 {
+    let delay = first_frame - launched;
+    if (0.0..10.0).contains(&delay) {
+        delay
+    } else {
+        0.0
     }
 }
 
@@ -155,5 +201,12 @@ mod tests {
             }
         );
         assert!("1280x720".parse::<CaptureRegion>().is_err());
+    }
+
+    #[test]
+    fn first_frame_delay_ignores_non_wallclock_timestamps() {
+        assert!((first_frame_delay(1_700_000_000.0, 1_700_000_000.25) - 0.25).abs() < 1e-6);
+        assert_eq!(first_frame_delay(1_700_000_000.0, 0.0), 0.0);
+        assert_eq!(first_frame_delay(1_700_000_000.0, 1_699_999_999.0), 0.0);
     }
 }
