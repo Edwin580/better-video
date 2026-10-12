@@ -279,24 +279,12 @@ pub fn reveal(path: &std::path::Path) {
 
 /// Ask for a folder with the system dialog (Windows). Blocks; `None` if
 /// cancelled or unsupported.
-#[cfg(feature = "tray")]
+#[cfg(all(feature = "tray", windows))]
 pub fn choose_folder(start: &std::path::Path) -> Option<PathBuf> {
-    if !cfg!(windows) {
-        return None;
-    }
-    // The .NET folder dialog via PowerShell: no COM plumbing needed here.
-    let script = format!(
-        "Add-Type -AssemblyName System.Windows.Forms; \
-         $d = New-Object System.Windows.Forms.FolderBrowserDialog; \
-         $d.Description = 'Save better-video recordings in'; \
-         $d.SelectedPath = '{}'; \
-         if ($d.ShowDialog() -eq 'OK') {{ $d.SelectedPath }}",
-        start.display().to_string().replace('\'', "''")
-    );
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-STA", "-Command", &script])
-        .output()
-        .ok()?;
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    (!path.is_empty()).then(|| PathBuf::from(path))
+    win::folder::choose(start)
+}
+
+#[cfg(all(feature = "tray", not(windows)))]
+pub fn choose_folder(_start: &std::path::Path) -> Option<PathBuf> {
+    None
 }

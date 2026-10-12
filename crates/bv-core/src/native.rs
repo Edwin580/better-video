@@ -1,5 +1,6 @@
 //! Export from a native `.bvraw` recording. GIFs are encoded entirely by
-//! bv-engine; MP4/WebM frames are piped to ffmpeg.
+//! bv-engine and MP4 by Windows' Media Foundation; WebM (and MP4 where
+//! Media Foundation is missing) is piped to ffmpeg.
 
 use std::{
     fs::File,
@@ -8,7 +9,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use bv_engine::{GifEncoder, PaletteBuilder, RawReader};
+use bv_engine::{GifEncoder, Mp4Encoder, PaletteBuilder, RawReader};
 
 use crate::{
     cursor::CursorTrack,
@@ -99,6 +100,25 @@ impl Job<'_> {
     }
 
     fn video(&self) -> Result<()> {
+        // MP4 with Windows' own H.264 encoder: no ffmpeg needed. Where
+        // Media Foundation is missing (Windows "N" editions), use ffmpeg.
+        if self.opts.format == OutputFormat::Mp4 {
+            match Mp4Encoder::create(
+                &self.opts.output,
+                self.out.width,
+                self.out.height,
+                self.opts.fps,
+            ) {
+                Ok(mut mp4) => {
+                    self.render(|frame, _| Ok(mp4.push(frame)?))?;
+                    return Ok(mp4.finish()?);
+                }
+                Err(e) if cfg!(windows) => {
+                    eprintln!("note: built-in MP4 encoder unavailable ({e}); trying ffmpeg");
+                }
+                Err(_) => {}
+            }
+        }
         let mut encoder = spawn_encoder(self.opts, self.out)?;
         let mut stdin = BufWriter::new(encoder.stdin.take().context("encoder stdin")?);
         let result =
