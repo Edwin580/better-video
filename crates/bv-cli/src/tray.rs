@@ -40,7 +40,8 @@ enum UserEvent {
     Tray(TrayIconEvent),
     /// A session started; `Err(None)` means the picker was cancelled.
     Started(Result<Box<Session>, Option<String>>),
-    Exported(Result<PathBuf, String>),
+    /// Saved, or `Err(None)` if the clip was discarded.
+    Exported(Result<PathBuf, Option<String>>),
     Folder(Option<PathBuf>),
 }
 
@@ -217,16 +218,19 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
                     Ok(t) => {
                         set_icon(&t, false);
                         tray = Some(t);
-                        let how = if cfg!(windows) {
-                            "Click the tray icon (it may be under ^ on the taskbar)"
+                        // Windows 11 hides new tray icons (sometimes without
+                        // even a ^ to reach them), so lead with the hotkey and
+                        // say where to turn the icon on.
+                        let body = if cfg!(windows) {
+                            format!(
+                                "Press {} or click the tray icon to record.\n\
+                                 No icon? Settings › Taskbar › Other system tray icons.",
+                                args.key
+                            )
                         } else {
-                            "Use the menu bar / tray icon"
+                            format!("Press {} or use the menu bar icon to record.", args.key)
                         };
-                        ui::toast(
-                            "better-video is running",
-                            &format!("{how} or press {} to record.", args.key),
-                            None,
-                        );
+                        ui::toast(ui::ToastKind::Info, "better-video is running", &body, None);
                         eprintln!(
                             "better-video is in your tray; recordings are saved to {}",
                             dir.display()
@@ -299,7 +303,7 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
                     }
                     Err(Some(e)) => {
                         eprintln!("error: {e}");
-                        ui::toast("Couldn't start recording", &e, None);
+                        ui::toast(ui::ToastKind::Error, "Couldn't start recording", &e, None);
                         items.show_idle(settings.last_area.is_some());
                         State::Idle
                     }
@@ -314,13 +318,14 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
                         let size = std::fs::metadata(&path).map_or(0, |m| m.len());
                         let copied = if items.copy.is_checked() {
-                            " · copied to clipboard"
+                            "Copied to clipboard · "
                         } else {
                             ""
                         };
                         ui::toast(
+                            ui::ToastKind::Saved,
                             &format!("Saved {name} ({})", human_size(size)),
-                            &format!("In {}{copied}. Click to show it.", dir.display()),
+                            &format!("{}\n{copied}Click to show it in the folder", dir.display()),
                             Some(path.clone()),
                         );
                         if let Some(t) = &tray {
@@ -328,9 +333,15 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
                         }
                         last = Some(path);
                     }
-                    Err(e) => {
+                    Err(None) => {}
+                    Err(Some(e)) => {
                         eprintln!("error: {e}");
-                        ui::toast("Couldn't save the recording", &e, None);
+                        ui::toast(
+                            ui::ToastKind::Error,
+                            "Couldn't save the recording",
+                            &e,
+                            None,
+                        );
                     }
                 }
             }
@@ -380,7 +391,9 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
                     tray.iter().for_each(|t| set_icon(t, false));
                     let proxy = proxy.clone();
                     thread::spawn(move || {
-                        let result = (*session).finish().map_err(|e| format!("{e:#}"));
+                        let result = (*session)
+                            .finish()
+                            .map_err(|e| (!e.is::<ui::Cancelled>()).then(|| format!("{e:#}")));
                         let _ = proxy.send_event(UserEvent::Exported(result));
                     });
                     State::Exporting
@@ -442,25 +455,77 @@ fn set_icon(tray: &TrayIcon, recording: bool) {
     }
 }
 
-/// 32×32 "record" glyph: a ring with a dot (idle) or a solid red disc
-/// (recording).
+/// 32×32 tray glyph. Idle: a ring (light on a dark taskbar, dark on a
+/// light one) around a red dot. Recording: a red disc with a stop square,
+/// since clicking it stops.
 fn icon(recording: bool) -> Icon {
     const N: u32 = 32;
+    let fg = if light_taskbar() {
+        [40, 40, 44]
+    } else {
+        [240, 240, 244]
+    };
+    let red = [255, 69, 58];
     let mut rgba = Vec::with_capacity((N * N * 4) as usize);
     let c = N as f64 / 2.0;
     for y in 0..N {
         for x in 0..N {
-            let d = ((x as f64 + 0.5 - c).powi(2) + (y as f64 + 0.5 - c).powi(2)).sqrt();
+            let (dx, dy) = (x as f64 + 0.5 - c, y as f64 + 0.5 - c);
+            let d = dx.hypot(dy);
             // Anti-aliased coverage of a disc of radius r.
             let disc = |r: f64| (r + 0.5 - d).clamp(0.0, 1.0);
             let (rgb, a) = if recording {
-                ([230, 40, 40], disc(13.0))
+                // Rounded stop square, 10 px wide, cut out in white.
+                let q = (dx.abs() - 3.0).max(0.0).hypot((dy.abs() - 3.0).max(0.0)) - 2.0;
+                let square = (0.5 - q).clamp(0.0, 1.0);
+                let mix = |r: u8, w: u8| (r as f64 + (w as f64 - r as f64) * square) as u8;
+                (
+                    [mix(red[0], 255), mix(red[1], 255), mix(red[2], 255)],
+                    disc(14.0),
+                )
             } else {
                 let ring = disc(14.0) - disc(11.0);
-                ([40, 40, 40], (ring + disc(7.0)).min(1.0))
+                let dot = disc(6.5);
+                if dot > ring {
+                    (red, dot)
+                } else {
+                    (fg, ring)
+                }
             };
             rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], (a * 255.0) as u8]);
         }
     }
     Icon::from_rgba(rgba, N, N).expect("valid icon dimensions")
+}
+
+/// Whether the Windows taskbar uses the light theme (it's dark by
+/// default on Windows 11). Elsewhere, assume light.
+fn light_taskbar() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Registry::{
+            RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,
+        };
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        let key = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+        let value = wide("SystemUsesLightTheme");
+        let mut data = 0u32;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                key.as_ptr(),
+                value.as_ptr(),
+                RRF_RT_REG_DWORD,
+                std::ptr::null_mut(),
+                &mut data as *mut u32 as *mut _,
+                &mut size,
+            )
+        };
+        status == 0 && data != 0
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
 }

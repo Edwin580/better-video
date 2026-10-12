@@ -24,14 +24,19 @@ bv tray
 ```
 
 1. A notification confirms better-video is running. Its icon is in the
-   taskbar tray (click **^** if it's hidden).
+   taskbar tray, but Windows 11 hides new tray icons: if you don't see it
+   (or a **^** leading to it), turn it on in **Settings › Personalization ›
+   Taskbar › Other system tray icons**. The hotkey works either way.
 2. **Click the icon** or press **Ctrl+Alt+R**. The screens dim: click a screen
-   to record all of it, or drag around the part you want.
-3. In the bar under your selection, pick **GIF** or **MP4** and a size
-   (**Small** is 640 px at 10 fps, the right size for a PR), then **Record**.
+   to record all of it, or drag around the part you want. Drag the handles to
+   resize, or inside the selection to move it.
+3. In the bar under your selection, pick **GIF** or **MP4**, a size
+   (**Small** is 640 px at 10 fps, the right size for a PR), and optionally
+   **Show clicks** and a **Zoom** mode, then **Record** (or press Enter).
    A 3-2-1 countdown starts.
 4. A red frame shows what's being recorded (it doesn't appear in the video).
-   Click **Stop** under it, click the tray icon, or press Ctrl+Alt+R again.
+   Click **Stop** in the pill under it, click the tray icon, or press
+   Ctrl+Alt+R again. **Discard** throws the take away.
 5. A notification shows the file name and size. The file is saved in
    **Videos\better-video** and copied to the clipboard, ready to paste into a
    PR. Click the notification to show it in Explorer.
@@ -67,12 +72,14 @@ bv doctor                 # checks ffmpeg + cursor tracking
 | `bv doctor` | Check dependencies. |
 
 **Choosing what to record:** `-s/--select` dims every screen before recording:
-click a screen to record all of it, or drag out an area (Esc cancels). A bar under the
-selection sets the format (GIF/MP4), size (Small 640px @ 10 fps, Medium 960px @
-12 fps, Large 1280px @ 15 fps), click rings and zoom, and shows where the file
-will be saved; Record starts a 3-second countdown (`--countdown 0` skips it).
-While recording, a red frame marks the area with a Stop button under it; both
-are hidden from the recording itself (Windows 10 2004 or later).
+click a screen to record all of it, or drag out an area (Esc cancels), then
+resize it with the handles or drag it around. A bar under the selection sets
+the format (GIF/MP4), size (Small 640px @ 10 fps, Medium 960px @ 12 fps,
+Large 1280px @ 15 fps), click rings and zoom (Off / Click / Hover / Follow),
+and shows where the file will be saved; Record starts a 3-second countdown
+(`--countdown 0` skips it). While recording, a red frame marks the area and a
+pill under it shows the time with Stop and Discard; all of it is hidden from
+the recording itself (Windows 10 2004 or later).
 
 Without `--select`, `record`, `hotkey` and `tray` capture the primary monitor
 by default. Pick another with `-m 2` (numbers from
