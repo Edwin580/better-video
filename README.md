@@ -72,22 +72,25 @@ bv doctor                 # what's available on this machine
 `bv` is built to be driven by tools as well as people:
 
 ```sh
-bv record demo.gif --window "My App" -d 8 --json   # fixed length
-bv record demo.gif --window "My App" --json &      # or: start in the background,
-# ...drive the app...
-bv stop                                            # ...then stop; prints the result
+bv record demo.mp4 --region 1000x600+100+80 --style gradient --zoom-on click --clicks --json &
+# ...drive the app (real pointer events: xdotool, cliclick, SendInput)...
+bv stop                    # stops it, waits for the export, prints the JSON result
+bv record demo.mp4 --window "My App" -d 15 --json   # or a fixed length (Windows: by title)
 ```
 
-- **Target by title.** `--window "Title"` records the front-most window
-  whose title contains the text; `bv windows` lists them.
 - **One JSON line.** With `--json`, stdout is exactly one line:
   `{"path", "bytes", "format", "width", "height", "seconds"}`. Progress and
   notes always go to stderr.
 - **Exit codes.** 0 saved, 1 error, 2 bad arguments, 3 cancelled or
   discarded by a person.
-- **Claude skill.** `bv skill install` puts a ready-made skill in
-  `~/.claude/skills/better-video/`, so Claude Code knows how to record a
-  demo of the feature it's working on and link it from a PR.
+- **Real pointer only.** bv samples the OS pointer for the drawn cursor,
+  click rings and zoom, so hold scripted clicks ~100–150 ms and move along
+  a path; Playwright/CDP clicks don't move it. Headless Linux works with
+  Xvfb, a window manager and a headed browser.
+- **Claude skill.** `bv skill install` puts a skill in
+  `~/.claude/skills/better-video/` (`bv skill show` prints it) that takes
+  Claude Code from a storyboard through recording, a frame-by-frame check
+  and attaching the MP4 to the pull request.
 
 ## Privacy and corporate use
 
