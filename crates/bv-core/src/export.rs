@@ -4,10 +4,13 @@ use std::{
     io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Stdio},
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+
+use bv_engine::RawWriter;
 
 use crate::{
     cursor::CursorTrack,
@@ -48,29 +51,11 @@ impl OutputFormat {
         }
     }
 
-    /// Encoder arguments, applied after the (already scaled) input.
-    /// `styled`: the frames sit on a static background (see [`crate::style`]).
-    fn encode_args(self, styled: bool) -> Vec<&'static str> {
+    /// ffmpeg encoder arguments for MP4 and WebM, applied after the
+    /// (already scaled) input. GIFs are encoded by bv-engine.
+    fn encode_args(self) -> Vec<&'static str> {
         match self {
-            // One-pass palette: `split` lets palettegen see the whole clip
-            // before paletteuse runs. `diff` modes keep static UI crisp and
-            // the file small. A styled frame's gradient and shadow never
-            // change, so `stats_mode=diff` would hardly count them and
-            // they'd band; count every pixel instead.
-            OutputFormat::Gif if styled => vec![
-                "-filter_complex",
-                "[0:v]split[a][b];[a]palettegen=stats_mode=full[p];\
-                 [b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle",
-                "-loop",
-                "0",
-            ],
-            OutputFormat::Gif => vec![
-                "-filter_complex",
-                "[0:v]split[a][b];[a]palettegen=stats_mode=diff[p];\
-                 [b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle",
-                "-loop",
-                "0",
-            ],
+            OutputFormat::Gif => vec![],
             OutputFormat::Mp4 => vec![
                 "-c:v",
                 "libx264",
@@ -176,6 +161,18 @@ pub fn export(opts: &ExportOptions) -> Result<Exported> {
     }
 
     let info = ffmpeg::probe(&opts.input)?;
+    if opts.format == OutputFormat::Gif {
+        // Decode once into a .bvraw and use the native GIF pipeline.
+        let raw = decode_to_raw(opts, &info)?;
+        let decoded = ExportOptions {
+            input: raw.0.clone(),
+            ..opts.clone()
+        };
+        let (size, seconds) = native::export(&decoded, track.as_ref())?;
+        return Ok(exported(opts, size, seconds));
+    }
+    // MP4/WebM stream through: x264/VP9 dominate the cost, and decoding
+    // runs alongside encoding.
     let layout = Layout::new(opts.style.as_ref(), info.size, opts.width);
     let input = input_args(opts, info.duration)?;
     if track.is_some() || opts.style.is_some() {
@@ -219,27 +216,17 @@ pub(crate) fn trimmed_length(duration: f64, start: f64, end: f64) -> Result<f64>
     Ok(keep)
 }
 
-/// No zoom: a single ffmpeg invocation does everything.
+/// Nothing to draw: a single ffmpeg invocation scales and encodes.
 fn export_plain(opts: &ExportOptions, input: &[String], out: Size) -> Result<()> {
     let scale = format!(
         "fps={},scale={}:{}:flags=lanczos",
         opts.fps, out.width, out.height
     );
     let mut cmd = ffmpeg::ffmpeg();
-    cmd.arg("-y").args(input);
-    match opts.format {
-        // GIF already uses -filter_complex; prepend the scale chain to it.
-        OutputFormat::Gif => {
-            let fc = format!(
-                "[0:v]{scale},split[a][b];[a]palettegen=stats_mode=diff[p];\
-                 [b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle"
-            );
-            cmd.args(["-filter_complex", &fc, "-loop", "0"]);
-        }
-        f => {
-            cmd.args(["-vf", &scale]).args(f.encode_args(false));
-        }
-    }
+    cmd.arg("-y")
+        .args(input)
+        .args(["-vf", &scale])
+        .args(opts.format.encode_args());
     let status = cmd
         .arg("-an")
         .arg(&opts.output)
@@ -251,7 +238,23 @@ fn export_plain(opts: &ExportOptions, input: &[String], out: Size) -> Result<()>
     Ok(())
 }
 
-/// Zoom / click rings / pointer / styling: ffmpeg decodes to raw RGBA, we pick a
+/// ffmpeg reading raw RGBA frames of size `out` on stdin and encoding them
+/// in `opts.format` (MP4 or WebM).
+pub(crate) fn spawn_encoder(opts: &ExportOptions, out: Size) -> Result<Child> {
+    ffmpeg::ffmpeg()
+        .arg("-y")
+        .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
+        .args(["-s", &format!("{}x{}", out.width, out.height)])
+        .args(["-r", &opts.fps.to_string()])
+        .args(["-i", "-"])
+        .args(opts.format.encode_args())
+        .arg(&opts.output)
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("starting ffmpeg encoder (MP4/WebM export needs ffmpeg)")
+}
+
+/// MP4/WebM with zoom / click rings / pointer / styling: ffmpeg decodes to raw RGBA, we pick a
 /// viewport per frame, crop/scale it, draw overlays and frame it, then pipe
 /// the result into a second ffmpeg to encode.
 fn export_rendered(
@@ -284,22 +287,6 @@ fn export_rendered(
         bail!("ffmpeg encoder failed ({enc_status})");
     }
     Ok(())
-}
-
-/// ffmpeg reading raw RGBA frames of size `out` on stdin and encoding them
-/// in `opts.format`.
-pub(crate) fn spawn_encoder(opts: &ExportOptions, out: Size) -> Result<Child> {
-    ffmpeg::ffmpeg()
-        .arg("-y")
-        .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
-        .args(["-s", &format!("{}x{}", out.width, out.height)])
-        .args(["-r", &opts.fps.to_string()])
-        .args(["-i", "-"])
-        .args(opts.format.encode_args(opts.style.is_some()))
-        .arg(&opts.output)
-        .stdin(Stdio::piped())
-        .spawn()
-        .context("starting ffmpeg encoder (MP4/WebM export needs ffmpeg)")
 }
 
 fn pump_frames(
@@ -354,6 +341,80 @@ fn pump_frames(
     Ok(())
 }
 
+/// A temporary `.bvraw`, deleted on drop.
+struct TempRaw(PathBuf);
+
+impl Drop for TempRaw {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Decode an ffmpeg recording into a temporary `.bvraw` at the export
+/// frame rate, so it can go through the native renderer: that one only
+/// redraws what changed, and its GIF encoder needs two passes over the
+/// clip without holding it in memory (ffmpeg's `palettegen` buffers every
+/// frame). Unchanged frames aren't stored, so the file stays small.
+fn decode_to_raw(opts: &ExportOptions, info: &ffmpeg::VideoInfo) -> Result<TempRaw> {
+    let (w, h) = (info.size.width, info.size.height);
+    let fps = opts.fps.max(1);
+    let temp = TempRaw(std::env::temp_dir().join(format!(
+        "bv-export-{}-{}.{}",
+        std::process::id(),
+        TEMP_ID.fetch_add(1, Ordering::Relaxed),
+        bv_engine::raw::EXTENSION
+    )));
+    let mut writer = RawWriter::create(&temp.0, w, h)
+        .with_context(|| format!("creating {}", temp.0.display()))?;
+    // Nothing past the end trim is ever shown.
+    let mut input = Vec::new();
+    let end = opts.trim_end.max(0.0);
+    if end > 0.0 {
+        input.extend([
+            "-t".into(),
+            format!("{:.3}", (info.duration - end).max(0.0)),
+        ]);
+    }
+    input.push("-i".into());
+    input.push(opts.input.to_string_lossy().into_owned());
+    let mut decoder = ffmpeg::ffmpeg()
+        .args(&input)
+        .args(["-vf", &format!("fps={fps}")])
+        .args(["-f", "rawvideo", "-pix_fmt", "bgra", "-"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("starting ffmpeg decoder")?;
+    let mut reader = decoder.stdout.take().context("decoder stdout")?;
+    let mut frame = vec![0u8; w as usize * h as usize * 4];
+    let mut pump = || -> Result<u64> {
+        let mut n = 0;
+        while read_frame(&mut reader, &mut frame)? {
+            writer.push(n as f64 / fps as f64, &frame)?;
+            n += 1;
+        }
+        Ok(n)
+    };
+    let pumped = pump();
+    drop(reader);
+    let status = decoder.wait()?;
+    let frames = pumped?;
+    if !status.success() {
+        bail!("ffmpeg decoder failed ({status})");
+    }
+    if frames == 0 {
+        bail!("no frames in {}", opts.input.display());
+    }
+    let length = if info.duration > 0.0 {
+        info.duration
+    } else {
+        frames as f64 / fps as f64
+    };
+    writer.finish(length)?;
+    Ok(temp)
+}
+
+static TEMP_ID: AtomicU32 = AtomicU32::new(0);
+
 /// Fill `buf` with exactly one frame; `Ok(false)` on clean end of stream.
 fn read_frame(r: &mut impl Read, buf: &mut [u8]) -> Result<bool> {
     let mut filled = 0;
@@ -381,6 +442,74 @@ mod tests {
             input_args(&opts, 10.0).unwrap(),
             ["-ss", "1.500", "-t", "6.500", "-i", "in.mkv"]
         );
+    }
+
+    /// A 2 s, 64×48, 30 fps clip made by ffmpeg, or `None` without it.
+    fn ffmpeg_clip(name: &str) -> Option<PathBuf> {
+        let path = std::env::temp_dir().join(format!("bv-{name}-{}.mkv", std::process::id()));
+        let ok = ffmpeg::ffmpeg()
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=64x48:rate=30:duration=2",
+            ])
+            .args([
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&path)
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        ok.then_some(path)
+    }
+
+    #[test]
+    fn ffmpeg_recordings_decode_to_raw_at_the_export_rate() {
+        let Some(clip) = ffmpeg_clip("decode") else {
+            eprintln!("skipped: no ffmpeg with libx264");
+            return;
+        };
+        let mut opts = ExportOptions::new(&clip, "unused.gif", OutputFormat::Gif);
+        opts.fps = 10;
+        let info = ffmpeg::probe(&clip).unwrap();
+        let raw = decode_to_raw(&opts, &info).unwrap();
+        let mut reader = bv_engine::RawReader::open(&raw.0).unwrap();
+        assert_eq!((reader.width(), reader.height()), (64, 48));
+        assert!((reader.duration() - info.duration).abs() < 0.05);
+        // testsrc changes every frame: each 0.1 s step shows something new.
+        for i in 1..20 {
+            assert!(reader.advance_to(i as f64 / 10.0).unwrap().is_some(), "{i}");
+        }
+        let path = raw.0.clone();
+        drop(raw);
+        assert!(!path.exists(), "temporary .bvraw is removed");
+        std::fs::remove_file(&clip).ok();
+    }
+
+    #[test]
+    fn ffmpeg_recordings_export_gifs_natively() {
+        let Some(clip) = ffmpeg_clip("gif") else {
+            eprintln!("skipped: no ffmpeg with libx264");
+            return;
+        };
+        let out = clip.with_extension("gif");
+        let mut opts = ExportOptions::new(&clip, &out, OutputFormat::Gif);
+        opts.width = Some(32);
+        opts.trim_end = 0.5;
+        let done = export(&opts).unwrap();
+        assert_eq!((done.width, done.height), (32, 24));
+        assert!((done.seconds - 1.5).abs() < 0.05);
+        let bytes = std::fs::read(&out).unwrap();
+        assert!(bytes.starts_with(b"GIF89a") && bytes.ends_with(&[0x3B]));
+        std::fs::remove_file(&clip).ok();
+        std::fs::remove_file(&out).ok();
     }
 
     #[test]

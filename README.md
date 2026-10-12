@@ -285,10 +285,13 @@ and export time went.
 
 1. **Record** — ffmpeg grabs the screen (`x11grab` / `avfoundation` / `gdigrab`)
    into a fast, visually lossless `.mkv`.
-2. **Export** — without zoom, a single ffmpeg pass scales and encodes (GIF uses
-   a one-pass `palettegen`/`paletteuse` tuned for screen content). With zoom,
-   click rings or a style, ffmpeg decodes to raw RGBA, frames are rendered as
-   below, and a second ffmpeg encodes.
+2. **Export** — GIFs: ffmpeg decodes the `.mkv` at the output frame rate into
+   a temporary `.bvraw` (only changed tiles are kept, so it's small), and the
+   native exporter above takes it from there: partial redraws, the built-in
+   palette and LZW coder, and two passes over the file instead of holding the
+   clip in memory. MP4/WebM: without zoom, pointer or style, a single ffmpeg
+   pass scales and encodes; otherwise ffmpeg decodes to raw RGBA, frames are
+   rendered as below, and a second ffmpeg encodes.
 
 Either way a background thread samples the cursor at ~120 Hz into a JSON
 track, `ZoomPlanner` plans the zooms from its clicks and picks a viewport
