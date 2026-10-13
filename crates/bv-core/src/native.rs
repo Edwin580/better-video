@@ -16,6 +16,7 @@ use crate::{
     export::{spawn_encoder, trimmed_length, ExportOptions, OutputFormat},
     geometry::{Rect, Size},
     overlay::ClickRings,
+    pointer::{hull, Pointer},
     render::{affected_rows, crop_scale_rgba_smooth},
     style::{Frame, Layout},
     zoom::ZoomPlanner,
@@ -25,8 +26,8 @@ use crate::{
 /// GIFs: about one palette step in a smooth gradient.
 const GIF_DITHER: f64 = 10.0;
 
-/// `track` is already shifted for `trim_start`, and `None` unless zoom or
-/// click rings need it.
+/// `track` is already shifted for `trim_start`, and `None` unless zoom,
+/// click rings or the pointer need it.
 /// Returns the output size and length.
 pub fn export(opts: &ExportOptions, track: Option<&CursorTrack>) -> Result<(Size, f64)> {
     let reader = open(opts)?;
@@ -158,6 +159,10 @@ impl Job<'_> {
             .zip(opts.zoom)
             .map(|(t, z)| ZoomPlanner::new(z, t, self.src));
         let rings = self.track.filter(|_| opts.click_rings).map(ClickRings::new);
+        let pointer = self
+            .track
+            .zip(opts.pointer)
+            .map(|(t, p)| Pointer::new(&p, t, self.src, self.layout.content));
 
         let fps = opts.fps.max(1) as f64;
         let start = opts.trim_start.max(0.0);
@@ -178,6 +183,9 @@ impl Job<'_> {
         let mut scratch = Vec::new();
         let mut last_view = None;
         let mut rings_were_active = false;
+        // The pointer as last drawn, and the rows it covered.
+        let mut last_pointer = None;
+        let mut last_pointer_rows = None;
 
         for i in 0..frames {
             let t = i as f64 / fps;
@@ -186,13 +194,33 @@ impl Job<'_> {
             let rings_active = rings.as_ref().is_some_and(|r| r.active_at(t));
             // Redraw everything when the camera moved or a ring is (or was
             // just) on screen; otherwise only the rows under new pixels.
-            let rows = if i == 0 || last_view != Some(view) || rings_active || rings_were_active {
+            let mut rows = if i == 0 || last_view != Some(view) || rings_active || rings_were_active
+            {
                 Some(all.clone())
             } else {
                 new_rows
                     .map(|r| affected_rows(r, view, out))
                     .filter(|r| !r.is_empty())
             };
+            let state = pointer.as_ref().and_then(|p| p.state(t));
+            let pointer_rows = pointer
+                .as_ref()
+                .zip(state.as_ref())
+                .map(|(p, s)| p.rows(s, out, view));
+            // A moved pointer must be erased where it was and drawn where
+            // it is. And it's only ever drawn over freshly rendered rows,
+            // or its soft edges would blend twice.
+            if state != last_pointer {
+                rows = hull(rows, last_pointer_rows.clone());
+                rows = hull(rows, pointer_rows.clone());
+            }
+            let redraw_pointer = match (&rows, &pointer_rows) {
+                (Some(r), Some(p)) => r.start < p.end && p.start < r.end,
+                _ => false,
+            };
+            if redraw_pointer {
+                rows = hull(rows, pointer_rows.clone());
+            }
             if let Some(rows) = &rows {
                 crop_scale_rgba_smooth(
                     reader.frame(),
@@ -206,7 +234,12 @@ impl Job<'_> {
                 if let Some(r) = &rings {
                     r.draw(&mut scaled, out, view, t);
                 }
+                if let (Some(p), Some(s), true) = (&pointer, &state, redraw_pointer) {
+                    p.draw(&mut scaled, out, view, s);
+                }
             }
+            last_pointer = state;
+            last_pointer_rows = pointer_rows;
             last_view = Some(view);
             rings_were_active = rings_active;
             match (&frame, &mut canvas) {
@@ -233,10 +266,11 @@ mod tests {
     use bv_engine::RawWriter;
 
     use super::*;
-    use crate::style::StylePreset;
+    use crate::{cursor::CursorSample, pointer::PointerStyle, style::StylePreset};
 
-    /// A 64×48 recording where a small square moves each frame.
-    fn recording(name: &str) -> std::path::PathBuf {
+    /// A 64×48 recording where a small square moves for 0.4 s; it lasts
+    /// `secs`.
+    fn recording(name: &str, secs: f64) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("bv-{name}-{}.bvraw", std::process::id()));
         let mut w = RawWriter::create(&path, 64, 48).unwrap();
         for i in 0..4 {
@@ -248,13 +282,98 @@ mod tests {
             }
             w.push(i as f64 * 0.1, &f).unwrap();
         }
-        w.finish(0.4).unwrap();
+        w.finish(secs).unwrap();
         path
+    }
+
+    /// Each output frame and the rows reported as changed.
+    type Frames = Vec<(Vec<u8>, Option<Range<usize>>)>;
+
+    fn frames(job: &Job) -> Frames {
+        let mut frames = Vec::new();
+        job.render(|f, rows| {
+            frames.push((f.to_vec(), rows));
+            Ok(())
+        })
+        .unwrap();
+        frames
+    }
+
+    /// The square recording with a pointer that crosses it for 0.6 s, then
+    /// rests; exported at 10 fps for 1.5 s.
+    fn pointer_job_frames(name: &str, pointer: Option<PointerStyle>) -> (Frames, CursorTrack) {
+        let path = recording(name, 1.5);
+        let track = CursorTrack {
+            samples: (0..=180)
+                .map(|i| {
+                    let t = i as f64 / 120.0;
+                    CursorSample {
+                        t,
+                        x: 5.0 + 60.0 * t.min(0.6),
+                        y: 10.0 + 20.0 * t.min(0.6),
+                        pressed: false,
+                    }
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut opts = ExportOptions::new(&path, "unused.gif", OutputFormat::Gif);
+        opts.fps = 10;
+        opts.pointer = pointer;
+        let src = Size::new(64, 48);
+        let job = Job {
+            opts: &opts,
+            track: Some(&track),
+            src,
+            layout: Layout::new(None, src, opts.width),
+            keep: 1.5,
+        };
+        let out = frames(&job);
+        std::fs::remove_file(&path).ok();
+        (out, track)
+    }
+
+    #[test]
+    fn pointer_partial_redraws_match_full_ones() {
+        let style = PointerStyle::default();
+        let (frames, track) = pointer_job_frames("pointer", Some(style));
+        assert_eq!(frames.len(), 15);
+        let src = Size::new(64, 48);
+        let pointer = Pointer::new(&style, &track, src, src);
+        let path = recording("pointer-ref", 0.4);
+        let mut reader = RawReader::open(&path).unwrap();
+        for (i, (frame, _)) in frames.iter().enumerate() {
+            let t = i as f64 / 10.0;
+            reader.advance_to(t).unwrap();
+            let mut want = reader.frame().to_vec();
+            if let Some(s) = pointer.state(t) {
+                pointer.draw(&mut want, src, Rect::full(src), &s);
+            }
+            assert!(frame == &want, "frame {i}");
+        }
+        std::fs::remove_file(&path).ok();
+        // Once the pointer and the recording are still, nothing changes.
+        assert!(frames[10..].iter().all(|f| f.1.is_none()));
+        // While it moves, it's drawn.
+        assert_ne!(frames[1].0, frames[2].0);
+    }
+
+    #[test]
+    fn os_cursor_mode_leaves_frames_untouched() {
+        let (frames, _) = pointer_job_frames("os-pointer", None);
+        let path = recording("os-pointer-ref", 0.4);
+        let mut reader = RawReader::open(&path).unwrap();
+        for (i, (frame, _)) in frames.iter().enumerate() {
+            reader.advance_to(i as f64 / 10.0).unwrap();
+            assert!(frame == reader.frame(), "frame {i}");
+        }
+        std::fs::remove_file(&path).ok();
+        assert!(frames[5..].iter().all(|f| f.1.is_none()));
     }
 
     #[test]
     fn styled_frames_only_change_inside_the_recording() {
-        let input = recording("styled");
+        let input = recording("styled", 0.4);
         let mut opts = ExportOptions::new(&input, "unused.gif", OutputFormat::Gif);
         opts.fps = 10;
         opts.style = Some(StylePreset::Gradient.style());

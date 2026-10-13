@@ -108,6 +108,7 @@ mod tests {
         };
         let track = CursorTrack {
             samples: vec![s(0.0, false), s(1.0, true), s(1.1, false)],
+            ..Default::default()
         };
         let rings = ClickRings::new(&track);
         let size = Size::new(200, 200);
@@ -148,6 +149,7 @@ mod tests {
         };
         let track = CursorTrack {
             samples: vec![s(0.0, false), s(1.0, true)],
+            ..Default::default()
         };
         let rings = ClickRings::new(&track);
         let size = Size::new(200, 200);

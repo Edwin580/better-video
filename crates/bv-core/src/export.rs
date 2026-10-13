@@ -15,6 +15,7 @@ use crate::{
     geometry::{Rect, Size},
     native,
     overlay::ClickRings,
+    pointer::{Pointer, PointerStyle},
     render::crop_scale_rgba_smooth,
     style::{Frame, FrameStyle, Layout},
     zoom::{ZoomConfig, ZoomPlanner},
@@ -112,6 +113,9 @@ pub struct ExportOptions {
     pub zoom: Option<ZoomConfig>,
     /// Draw a ring where each click happened; needs `cursor`.
     pub click_rings: bool,
+    /// Draw the mouse pointer from `cursor` (for recordings made without
+    /// the OS pointer in them).
+    pub pointer: Option<PointerStyle>,
     pub cursor: Option<CursorTrack>,
     /// Seconds to cut from the start of the recording.
     pub trim_start: f64,
@@ -137,6 +141,7 @@ impl ExportOptions {
             width: Some(1280),
             zoom: None,
             click_rings: false,
+            pointer: None,
             cursor: None,
             trim_start: 0.0,
             trim_end: 0.0,
@@ -156,7 +161,7 @@ pub struct Exported {
 }
 
 pub fn export(opts: &ExportOptions) -> Result<Exported> {
-    let wants_cursor = opts.zoom.is_some() || opts.click_rings;
+    let wants_cursor = opts.zoom.is_some() || opts.click_rings || opts.pointer.is_some();
     let track = match &opts.cursor {
         Some(track) if wants_cursor && !track.is_empty() => {
             let mut track = track.clone();
@@ -246,7 +251,7 @@ fn export_plain(opts: &ExportOptions, input: &[String], out: Size) -> Result<()>
     Ok(())
 }
 
-/// Zoom / click rings / styling: ffmpeg decodes to raw RGBA, we pick a
+/// Zoom / click rings / pointer / styling: ffmpeg decodes to raw RGBA, we pick a
 /// viewport per frame, crop/scale it, draw overlays and frame it, then pipe
 /// the result into a second ffmpeg to encode.
 fn export_rendered(
@@ -311,6 +316,9 @@ fn pump_frames(
         .zip(opts.zoom)
         .map(|(t, z)| ZoomPlanner::new(z, t, src));
     let rings = track.filter(|_| opts.click_rings).map(ClickRings::new);
+    let pointer = track
+        .zip(opts.pointer)
+        .map(|(t, p)| Pointer::new(&p, t, src, layout.content));
     let frame_style = opts.style.as_ref().map(|s| Frame::new(s, layout));
     let mut canvas = frame_style.as_ref().map(Frame::blank);
 
@@ -326,6 +334,9 @@ fn pump_frames(
         crop_scale_rgba_smooth(&frame, src, view, &mut scaled, out, rows, &mut scratch);
         if let Some(rings) = &rings {
             rings.draw(&mut scaled, out, view, t);
+        }
+        if let Some((p, s)) = pointer.as_ref().and_then(|p| Some((p, p.state(t)?))) {
+            p.draw(&mut scaled, out, view, &s);
         }
         let image = match (&frame_style, &mut canvas) {
             (Some(f), Some(canvas)) => {

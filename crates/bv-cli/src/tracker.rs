@@ -44,6 +44,11 @@ impl CursorTracker {
         Some(Self { stop, handle })
     }
 
+    /// Whether cursor tracking works here.
+    pub fn available() -> bool {
+        backend::poller().is_some()
+    }
+
     pub fn finish(self) -> CursorTrack {
         self.stop.store(true, Ordering::Relaxed);
         self.handle.join().unwrap_or_default()
