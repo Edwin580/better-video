@@ -203,20 +203,23 @@ struct ExportArgs {
     /// Draw a ring wherever you click.
     #[arg(long)]
     clicks: bool,
-    /// Zoom magnification.
-    #[arg(long, default_value_t = 2.0)]
+    /// The deepest zoom allowed. Click and hover zooms use the deepest of
+    /// 1.25, 1.5 and 1.8 (or this, if deeper) that still frames all the
+    /// clicks they cover; follow zoom uses exactly this.
+    #[arg(long, default_value_t = bv_core::zoom::DEFAULT_LEVEL, value_name = "X")]
     zoom_level: f64,
     /// What makes the camera zoom in: `click`, `hover` (where the cursor
     /// rests), `click-or-hover`, or `follow` (always zoomed, panning with
     /// the cursor). Implies zoom.
     #[arg(long, value_enum, value_name = "TRIGGER")]
     zoom_on: Option<ZoomOn>,
-    /// Seconds to stay zoomed after a click or once the cursor moves on.
+    /// Seconds to stay zoomed after the last click or once the cursor
+    /// moves on.
     #[arg(long, default_value_t = 1.5, value_name = "SECS")]
     zoom_hold: f64,
-    /// Roughly how long the camera takes to settle, in seconds. Larger is
-    /// smoother and slower.
-    #[arg(long, default_value_t = 0.8, value_name = "SECS")]
+    /// Pace of camera moves: at 0.8 a zoom to 1.25x takes 0.7 s and to
+    /// 1.8x 0.9 s; moves scale in proportion. Larger is slower.
+    #[arg(long, default_value_t = bv_core::zoom::DEFAULT_SMOOTHING, value_name = "SECS")]
     zoom_smooth: f64,
     /// For hover zoom: how long the cursor must stay put to count as
     /// resting, in seconds.

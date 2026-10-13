@@ -58,7 +58,7 @@ Recommended for a PR:
 
 ```sh
 bv record demo.mp4 --region 560x420+680+110 \
-  --style gradient --zoom-on click --clicks --zoom-level 1.5 \
+  --style gradient --zoom-on click --clicks \
   --trim-start 0.5 --trim-end 0.5 --keep-raw --json > demo.json &
 # ... drive the app: the storyboard beats (section 4) ...
 bv stop          # stops it, waits for the export, prints the JSON result
@@ -72,8 +72,10 @@ bv stop          # stops it, waits for the export, prints the JSON result
   rests); **`--clicks`** draws a ring at each click. The pointer is drawn
   at export by default (`--cursor drawn`); `--cursor-size 2` makes it
   bigger.
-- **`--zoom-level`** defaults to 2. For a small area (under ~800 px wide)
-  use `--zoom-level 1.5`, or the zoom crops off what changed.
+- **Zoom picks its own depth** (1.25x to 1.8x) to frame the clicks it
+  covers, opens and ends on the whole screen, and skips clicks it can't
+  show well (spread out, too early or too late). Leave `--zoom-level`
+  alone; it only caps the depth.
 - **Size:** `-w` defaults to 1280 (small recordings are never scaled up).
   MP4 defaults to 30 fps; keep it. For a GIF use `-w 800 --fps 12`.
 - **`--trim-start/--trim-end SECS`** cut the setup before the first beat
@@ -93,16 +95,18 @@ bv stop          # stops it, waits for the export, prints the JSON result
 zoom, trim or pointer settings:
 
 ```sh
-bv export demo.raw.mkv -o demo.mp4 --style dark --zoom-on click --clicks --zoom-level 1.25
+bv export demo.raw.mkv -o demo.mp4 --style dark --zoom-on click --clicks --zoom-level 1.25  # gentler zoom
 bv export demo.raw.mkv -o demo.gif -w 800 --fps 12 --style gradient --zoom-on click --clicks
 ```
 
 ## 4. Drive the app
 
 Do it from a script so every take has the same timing. Move deliberately
-and pause about 1 s after each result appears. The camera follows the
-pointer: after a click whose result shows up elsewhere (a new row, a
-toast), glide the pointer onto the result and hold it there.
+and pause about 1 s after each result appears. Zoom is planned from the
+clicks: start the first beat ~2.5 s in (the clip opens on the whole
+screen), keep the clicks of one beat close together (within ~3 s and a
+part of the screen) so they share one zoom, and leave ~2 s after the last
+click before stopping.
 
 bv samples the **real OS pointer**, so:
 
@@ -204,8 +208,9 @@ Report the PR or comment URL.
 | Symptom | Fix |
 |---|---|
 | No pointer, rings or zoom | `bv doctor` must say cursor tracking is available (Linux: `DISPLAY` is X11). Drive with real pointer events (section 4), not Playwright/CDP. |
-| A click has no ring/zoom | Hold the button 100–150 ms. Zoom starts 0.4 s before the press, so don't click in the first half second. |
-| Zoom aims at the wrong place / crops the result | The region is wrong (probe it), the pointer jumped (glide), or the zoom is too strong for a small area (`--zoom-level 1.5`); re-export the raw take. |
+| A click has no ring | Hold the button 100–150 ms. |
+| A click has no zoom | Expected for a click in the first 2.5 s or last second, one far from the clicks around it, or one a zoom couldn't hold for ~2 s without hiding the next. Group the beat's clicks, leave room before and after. |
+| Zoom crops the result | The region is wrong (probe it), or the result appears far from the clicks; `--zoom-level 1.25` keeps zooms gentle; re-export the raw take. |
 | Empty / black recording | Wrong region or display; on Linux check `DISPLAY` and that the window is on that screen. Probe with `-d 1`. |
 | `bv stop`: "No recordings running." | It already ended (`-d`), it failed (read its stderr), or it ran with a different `TMPDIR`. |
 | `bv stop` takes minutes | Long takes export slowly; keep it under 30 s. `bv stop --timeout 120` bounds the wait. |
