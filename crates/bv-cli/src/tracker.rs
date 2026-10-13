@@ -52,7 +52,7 @@ impl CursorTracker {
 
 type Poller = Box<dyn Fn() -> (i32, i32, bool) + Send>;
 
-#[cfg(feature = "cursor")]
+#[cfg(feature = "input")]
 mod backend {
     use device_query::{DeviceQuery, DeviceState};
 
@@ -69,7 +69,7 @@ mod backend {
     }
 }
 
-#[cfg(not(feature = "cursor"))]
+#[cfg(not(feature = "input"))]
 mod backend {
     pub fn poller() -> Option<super::Poller> {
         None

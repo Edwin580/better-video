@@ -145,7 +145,13 @@ pub fn capture_filter(platform: Platform, opts: &RecordOptions) -> String {
 pub struct VideoInfo {
     pub size: Size,
     pub duration: f64,
+    /// Timestamp of the first frame. Recordings keep wall-clock timestamps,
+    /// so for those this is seconds since the Unix epoch.
+    pub start_time: f64,
 }
+
+/// Timestamps above this (2001-09-09) are treated as Unix wall-clock time.
+pub const WALLCLOCK_MIN: f64 = 1e9;
 
 pub fn probe(path: &Path) -> Result<VideoInfo> {
     #[derive(Deserialize)]
@@ -161,13 +167,14 @@ pub fn probe(path: &Path) -> Result<VideoInfo> {
     #[derive(Deserialize)]
     struct Format {
         duration: Option<String>,
+        start_time: Option<String>,
     }
 
     let out = Command::new(ffprobe_bin())
         .args(["-v", "error", "-select_streams", "v:0"])
         .args([
             "-show_entries",
-            "stream=width,height:format=duration",
+            "stream=width,height:format=duration,start_time",
             "-of",
             "json",
         ])
@@ -180,14 +187,18 @@ pub fn probe(path: &Path) -> Result<VideoInfo> {
     }
     let parsed: Out = serde_json::from_slice(&out.stdout).context("parsing ffprobe output")?;
     let stream = parsed.streams.first().context("no video stream found")?;
-    let duration = parsed
-        .format
-        .duration
-        .and_then(|d| d.parse().ok())
-        .unwrap_or(0.0);
+    let num = |v: Option<String>| v.and_then(|d| d.parse().ok()).unwrap_or(0.0);
+    let start_time = num(parsed.format.start_time);
+    let mut duration = num(parsed.format.duration);
+    // Matroska reports the end timestamp as the duration; with wall-clock
+    // timestamps that's ~1.7e9, so convert it back to a length.
+    if start_time > WALLCLOCK_MIN && duration > start_time {
+        duration -= start_time;
+    }
     Ok(VideoInfo {
         size: Size::new(stream.width, stream.height),
         duration,
+        start_time,
     })
 }
 
