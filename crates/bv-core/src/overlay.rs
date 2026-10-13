@@ -1,5 +1,7 @@
 //! Effects drawn on top of exported frames.
 
+use std::ops::Range;
+
 use crate::{
     cursor::CursorTrack,
     geometry::{Rect, Size},
@@ -7,6 +9,8 @@ use crate::{
 
 const RING_SECS: f64 = 0.5;
 const RING_COLOR: [u8; 3] = [255, 196, 0];
+/// Thickness of the dark outline, the widest part of a ring.
+const OUTLINE: f64 = 7.0;
 
 /// Expanding, fading ring at each click, so viewers can see what was
 /// clicked even without zoom.
@@ -25,32 +29,72 @@ impl ClickRings {
         Self { clicks }
     }
 
-    /// Whether any ring is visible at time `t`.
-    pub fn active_at(&self, t: f64) -> bool {
-        let first = self.clicks.partition_point(|c| c.0 < t - RING_SECS);
-        self.clicks.get(first).is_some_and(|c| c.0 <= t)
-    }
-
     /// Draw the rings active at time `t` onto `frame` (RGBA, `size`), which
     /// shows the source region `view`.
     pub fn draw(&self, frame: &mut [u8], size: Size, view: Rect, t: f64) {
+        for r in self.rings(size, view, t) {
+            // Dark outline under the coloured ring keeps it visible on any
+            // background, including one the same colour as the ring.
+            let (cx, cy, radius) = (r.cx, r.cy, r.radius);
+            draw_ring(
+                frame,
+                size,
+                cx,
+                cy,
+                radius,
+                OUTLINE * r.px,
+                [0; 3],
+                0.8 * r.alpha,
+            );
+            draw_ring(frame, size, cx, cy, radius, 3.0 * r.px, RING_COLOR, r.alpha);
+        }
+    }
+
+    /// Output rows [`ClickRings::draw`] touches at time `t`, if any.
+    pub fn rows(&self, size: Size, view: Rect, t: f64) -> Option<Range<usize>> {
+        let h = size.height as i64;
+        self.rings(size, view, t)
+            .map(|r| {
+                // As `draw_ring` bounds it, with a pixel to spare.
+                let reach = r.radius + OUTLINE * r.px;
+                let y0 = ((r.cy - reach).floor() as i64 - 1).clamp(0, h);
+                let y1 = ((r.cy + reach).ceil() as i64 + 2).clamp(0, h);
+                y0 as usize..y1 as usize
+            })
+            .filter(|r| !r.is_empty())
+            .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end))
+    }
+
+    fn rings(&self, size: Size, view: Rect, t: f64) -> impl Iterator<Item = Ring> + '_ {
         let first = self.clicks.partition_point(|c| c.0 < t - RING_SECS);
         let scale = size.width as f64 / view.width;
         // Ring size is relative to the output, not the zoom level.
         let px = (size.width as f64 / 1280.0).max(0.5);
-        for &(ct, x, y) in self.clicks[first..].iter().take_while(|c| c.0 <= t) {
-            let p = (t - ct) / RING_SECS;
-            let ease = 1.0 - (1.0 - p) * (1.0 - p);
-            let radius = (10.0 + 24.0 * ease) * px;
-            let cx = (x - view.x) * scale;
-            let cy = (y - view.y) * scale;
-            let alpha = 1.0 - p * p;
-            // Dark outline under the coloured ring keeps it visible on any
-            // background, including one the same colour as the ring.
-            draw_ring(frame, size, cx, cy, radius, 7.0 * px, [0; 3], 0.8 * alpha);
-            draw_ring(frame, size, cx, cy, radius, 3.0 * px, RING_COLOR, alpha);
-        }
+        self.clicks[first..]
+            .iter()
+            .take_while(move |c| c.0 <= t)
+            .map(move |&(ct, x, y)| {
+                let p = (t - ct) / RING_SECS;
+                let ease = 1.0 - (1.0 - p) * (1.0 - p);
+                Ring {
+                    cx: (x - view.x) * scale,
+                    cy: (y - view.y) * scale,
+                    radius: (10.0 + 24.0 * ease) * px,
+                    px,
+                    alpha: 1.0 - p * p,
+                }
+            })
     }
+}
+
+/// One ring as drawn at some moment, in output pixels.
+struct Ring {
+    cx: f64,
+    cy: f64,
+    radius: f64,
+    /// Output pixels per 1280-wide pixel.
+    px: f64,
+    alpha: f64,
 }
 
 /// Anti-aliased ring blended onto an RGBA frame.

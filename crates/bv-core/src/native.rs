@@ -182,7 +182,8 @@ impl Job<'_> {
         let mut scaled = vec![0u8; out.width as usize * out.height as usize * 4];
         let mut scratch = Vec::new();
         let mut last_view = None;
-        let mut rings_were_active = false;
+        // Rows the click rings covered in the previous frame.
+        let mut last_ring_rows = None;
         // The pointer as last drawn, and the rows it covered.
         let mut last_pointer = None;
         let mut last_pointer_rows = None;
@@ -191,17 +192,20 @@ impl Job<'_> {
             let t = i as f64 / fps;
             let new_rows = reader.advance_to(start + t)?;
             let view = planner.as_mut().map_or(Rect::full(self.src), |p| p.next(t));
-            let rings_active = rings.as_ref().is_some_and(|r| r.active_at(t));
-            // Redraw everything when the camera moved or a ring is (or was
-            // just) on screen; otherwise only the rows under new pixels.
-            let mut rows = if i == 0 || last_view != Some(view) || rings_active || rings_were_active
-            {
+            let ring_rows = rings.as_ref().and_then(|r| r.rows(out, view, t));
+            // Redraw everything when the camera moved; otherwise only the
+            // rows under new pixels, and under click rings, which animate
+            // and must be erased where they were. Rings are only ever drawn
+            // over freshly rendered rows, or they'd blend twice.
+            let mut rows = if i == 0 || last_view != Some(view) {
                 Some(all.clone())
             } else {
                 new_rows
                     .map(|r| affected_rows(r, view, out))
                     .filter(|r| !r.is_empty())
             };
+            rows = hull(rows, last_ring_rows.clone());
+            rows = hull(rows, ring_rows.clone());
             let state = pointer.as_ref().and_then(|p| p.state(t));
             let pointer_rows = pointer
                 .as_ref()
@@ -241,7 +245,7 @@ impl Job<'_> {
             last_pointer = state;
             last_pointer_rows = pointer_rows;
             last_view = Some(view);
-            rings_were_active = rings_active;
+            last_ring_rows = ring_rows;
             match (&frame, &mut canvas) {
                 (Some(f), Some(canvas)) => {
                     if let Some(rows) = &rows {
@@ -356,6 +360,65 @@ mod tests {
         assert!(frames[10..].iter().all(|f| f.1.is_none()));
         // While it moves, it's drawn.
         assert_ne!(frames[1].0, frames[2].0);
+    }
+
+    #[test]
+    fn click_ring_partial_redraws_match_full_ones() {
+        // Two clicks while the pointer moves, then everything rests.
+        let path = recording("rings", 1.5);
+        let track = CursorTrack {
+            samples: (0..=180)
+                .map(|i| {
+                    let t = i as f64 / 120.0;
+                    CursorSample {
+                        t,
+                        x: 8.0 + 40.0 * t.min(0.8),
+                        y: 30.0 - 10.0 * t.min(0.8),
+                        pressed: (0.2..0.3).contains(&t) || (0.6..0.65).contains(&t),
+                    }
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let style = PointerStyle::default();
+        let mut opts = ExportOptions::new(&path, "unused.gif", OutputFormat::Gif);
+        opts.fps = 20;
+        opts.click_rings = true;
+        opts.pointer = Some(style);
+        let src = Size::new(64, 48);
+        let job = Job {
+            opts: &opts,
+            track: Some(&track),
+            src,
+            layout: Layout::new(None, src, opts.width),
+            keep: 1.5,
+        };
+        let frames = frames(&job);
+        std::fs::remove_file(&path).ok();
+        assert_eq!(frames.len(), 30);
+
+        let rings = ClickRings::new(&track);
+        let pointer = Pointer::new(&style, &track, src, src);
+        let path = recording("rings-ref", 0.4);
+        let mut reader = RawReader::open(&path).unwrap();
+        let mut ringed = 0;
+        for (i, (frame, rows)) in frames.iter().enumerate() {
+            let t = i as f64 / 20.0;
+            reader.advance_to(t).unwrap();
+            let mut want = reader.frame().to_vec();
+            rings.draw(&mut want, src, Rect::full(src), t);
+            if let Some(s) = pointer.state(t) {
+                pointer.draw(&mut want, src, Rect::full(src), &s);
+            }
+            assert!(frame == &want, "frame {i}");
+            if let (Some(r), Some(rows)) = (rings.rows(src, Rect::full(src), t), rows) {
+                assert!(rows.start <= r.start && r.end <= rows.end, "frame {i}");
+                ringed += 1;
+            }
+        }
+        std::fs::remove_file(&path).ok();
+        assert!(ringed >= 10, "rings were drawn in {ringed} frames");
+        assert!(frames[25..].iter().all(|f| f.1.is_none()));
     }
 
     #[test]

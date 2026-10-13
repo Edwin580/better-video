@@ -143,8 +143,8 @@ struct CaptureArgs {
     /// Stop automatically after this many seconds.
     #[arg(long, short = 'd')]
     duration: Option<f64>,
-    /// Capture frame rate [default: the export frame rate with the native
-    /// engine, 30 with ffmpeg].
+    /// Capture frame rate [default: the export frame rate; 30 with ffmpeg
+    /// and --keep-raw].
     #[arg(long)]
     capture_fps: Option<u32>,
     /// What captures the screen: `native` (built in, Windows only; GIFs
@@ -579,12 +579,14 @@ impl CaptureArgs {
         }
     }
 
-    /// Native capture only needs as many frames as the export keeps;
-    /// ffmpeg's intermediate may be re-exported at any rate.
+    /// Capture only needs as many frames as the export keeps: every one
+    /// more is encoded for nothing (a 15 fps GIF captured at 30 costs the
+    /// ffmpeg grabber twice the CPU). A kept ffmpeg intermediate may be
+    /// re-exported at any rate, so that one gets 30.
     fn capture_fps(&self, engine: Engine, format: OutputFormat) -> u32 {
         self.capture_fps.unwrap_or(match engine {
-            Engine::Native => self.export.fps(format),
-            Engine::Ffmpeg => 30,
+            Engine::Ffmpeg if self.keep_raw => self.export.fps(format).max(30),
+            _ => self.export.fps(format),
         })
     }
 }
@@ -1213,6 +1215,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn capture_rate_follows_the_export_unless_the_raw_is_kept() {
+        use clap::Parser;
+        let fps = |args: &[&str], engine| {
+            let cli = Cli::try_parse_from([&["bv", "record"], args].concat()).unwrap();
+            let Command::Record(r) = cli.command else {
+                panic!("not a record command");
+            };
+            let format = r.capture.export.format(None);
+            r.capture.capture_fps(engine, format)
+        };
+        assert_eq!(fps(&["--gif"], Engine::Ffmpeg), 15);
+        assert_eq!(fps(&["--gif", "--fps", "10"], Engine::Native), 10);
+        assert_eq!(fps(&["--format", "mp4"], Engine::Ffmpeg), 30);
+        assert_eq!(fps(&["--gif", "--keep-raw"], Engine::Ffmpeg), 30);
+        assert_eq!(fps(&["--gif", "--keep-raw"], Engine::Native), 15);
+        assert_eq!(fps(&["--gif", "--capture-fps", "24"], Engine::Ffmpeg), 24);
     }
 
     #[cfg(not(windows))]

@@ -284,11 +284,17 @@ and export time went.
 **ffmpeg engine** (Linux, macOS, or `--engine ffmpeg`):
 
 1. **Record** — ffmpeg grabs the screen (`x11grab` / `avfoundation` / `gdigrab`)
-   into a fast, visually lossless `.mkv`.
-2. **Export** — without zoom, a single ffmpeg pass scales and encodes (GIF uses
-   a one-pass `palettegen`/`paletteuse` tuned for screen content). With zoom,
-   click rings or a style, ffmpeg decodes to raw RGBA, frames are rendered as
-   below, and a second ffmpeg encodes.
+   into a fast, visually lossless `.mkv`, at the export frame rate (15 fps
+   for a GIF, which halves the grabber's CPU compared with 30). With
+   `--keep-raw` it captures at least 30 fps so the take can be re-exported
+   at any rate; `--capture-fps` overrides both.
+2. **Export** — GIFs: ffmpeg decodes the `.mkv` at the output frame rate into
+   a temporary `.bvraw` (only changed tiles are kept, so it's small), and the
+   native exporter above takes it from there: partial redraws, the built-in
+   palette and LZW coder, and two passes over the file instead of holding the
+   clip in memory. MP4/WebM: without zoom, pointer or style, a single ffmpeg
+   pass scales and encodes; otherwise ffmpeg decodes to raw RGBA, frames are
+   rendered as below, and a second ffmpeg encodes.
 
 Either way a background thread samples the cursor at ~120 Hz into a JSON
 track, `ZoomPlanner` plans the zooms from its clicks and picks a viewport
@@ -296,8 +302,8 @@ per frame (a pure function of time, clamped to the screen), and `render` crops +
 The pointer is then drawn from the track: a spring-smoothed path (pulled back
 onto the recorded one around each click, snapping once settled) and a
 signed-distance arrow, anti-aliased, mapped through the zoom viewport like
-click rings. The native exporter only redraws the rows where the pointer was
-and is, so a still pointer leaves frames identical.
+click rings. The native exporter only redraws the rows where the pointer and
+click rings were and are, so a still pointer leaves frames identical.
 With `--style`, the background and shadow are drawn once and each frame's
 changed rows are copied into the frame with anti-aliased corners, so
 everything outside the recording is byte-identical from frame to frame (the
