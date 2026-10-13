@@ -18,6 +18,7 @@ mod native;
 pub mod overlay;
 pub mod record;
 pub mod render;
+pub mod style;
 pub mod window;
 pub mod zoom;
 
@@ -26,4 +27,5 @@ pub use export::{export, ExportOptions, Exported, OutputFormat};
 pub use geometry::{Rect, Size};
 pub use monitor::{Monitor, MonitorChoice};
 pub use record::{CaptureRegion, Engine, RecordOptions, Recorded, Recording};
+pub use style::{Background, FrameStyle, StylePreset};
 pub use zoom::{ZoomConfig, ZoomPlanner};

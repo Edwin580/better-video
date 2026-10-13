@@ -15,7 +15,8 @@ use crate::{
     geometry::{Rect, Size},
     native,
     overlay::ClickRings,
-    render::crop_scale_rgba,
+    render::crop_scale_rgba_smooth,
+    style::{Frame, FrameStyle, Layout},
     zoom::{ZoomConfig, ZoomPlanner},
 };
 
@@ -47,11 +48,21 @@ impl OutputFormat {
     }
 
     /// Encoder arguments, applied after the (already scaled) input.
-    fn encode_args(self) -> Vec<&'static str> {
+    /// `styled`: the frames sit on a static background (see [`crate::style`]).
+    fn encode_args(self, styled: bool) -> Vec<&'static str> {
         match self {
             // One-pass palette: `split` lets palettegen see the whole clip
             // before paletteuse runs. `diff` modes keep static UI crisp and
-            // the file small.
+            // the file small. A styled frame's gradient and shadow never
+            // change, so `stats_mode=diff` would hardly count them and
+            // they'd band; count every pixel instead.
+            OutputFormat::Gif if styled => vec![
+                "-filter_complex",
+                "[0:v]split[a][b];[a]palettegen=stats_mode=full[p];\
+                 [b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle",
+                "-loop",
+                "0",
+            ],
             OutputFormat::Gif => vec![
                 "-filter_complex",
                 "[0:v]split[a][b];[a]palettegen=stats_mode=diff[p];\
@@ -106,6 +117,9 @@ pub struct ExportOptions {
     pub trim_start: f64,
     /// Seconds to cut from the end of the recording.
     pub trim_end: f64,
+    /// Background, padding, rounded corners and shadow around the
+    /// recording. `width` is then the width of the whole frame.
+    pub style: Option<FrameStyle>,
 }
 
 impl ExportOptions {
@@ -126,6 +140,7 @@ impl ExportOptions {
             cursor: None,
             trim_start: 0.0,
             trim_end: 0.0,
+            style: None,
         }
     }
 }
@@ -156,15 +171,16 @@ pub fn export(opts: &ExportOptions) -> Result<Exported> {
     }
 
     let info = ffmpeg::probe(&opts.input)?;
-    let out_size = info.size.fit_width(opts.width.unwrap_or(info.size.width));
+    let layout = Layout::new(opts.style.as_ref(), info.size, opts.width);
     let input = input_args(opts, info.duration)?;
-    match &track {
-        Some(track) => export_rendered(opts, &input, track, info.size, out_size)?,
-        None => export_plain(opts, &input, out_size)?,
+    if track.is_some() || opts.style.is_some() {
+        export_rendered(opts, &input, track.as_ref(), info.size, layout)?;
+    } else {
+        export_plain(opts, &input, layout.canvas)?;
     }
     let (start, end) = (opts.trim_start.max(0.0), opts.trim_end.max(0.0));
     let seconds = trimmed_length(info.duration, start, end)?;
-    Ok(exported(opts, out_size, seconds))
+    Ok(exported(opts, layout.canvas, seconds))
 }
 
 fn exported(opts: &ExportOptions, size: Size, seconds: f64) -> Exported {
@@ -216,7 +232,7 @@ fn export_plain(opts: &ExportOptions, input: &[String], out: Size) -> Result<()>
             cmd.args(["-filter_complex", &fc, "-loop", "0"]);
         }
         f => {
-            cmd.args(["-vf", &scale]).args(f.encode_args());
+            cmd.args(["-vf", &scale]).args(f.encode_args(false));
         }
     }
     let status = cmd
@@ -230,15 +246,15 @@ fn export_plain(opts: &ExportOptions, input: &[String], out: Size) -> Result<()>
     Ok(())
 }
 
-/// Zoom / click rings: ffmpeg decodes to raw RGBA, we pick a viewport per
-/// frame, crop/scale it and draw overlays, then pipe the result into a
-/// second ffmpeg to encode.
+/// Zoom / click rings / styling: ffmpeg decodes to raw RGBA, we pick a
+/// viewport per frame, crop/scale it, draw overlays and frame it, then pipe
+/// the result into a second ffmpeg to encode.
 fn export_rendered(
     opts: &ExportOptions,
     input: &[String],
-    track: &CursorTrack,
+    track: Option<&CursorTrack>,
     src: Size,
-    out: Size,
+    layout: Layout,
 ) -> Result<()> {
     let mut decoder = ffmpeg::ffmpeg()
         .args(input)
@@ -248,9 +264,9 @@ fn export_rendered(
         .spawn()
         .context("starting ffmpeg decoder")?;
 
-    let mut encoder = spawn_encoder(opts, out)?;
+    let mut encoder = spawn_encoder(opts, layout.canvas)?;
 
-    let result = pump_frames(&mut decoder, &mut encoder, opts, track, src, out);
+    let result = pump_frames(&mut decoder, &mut encoder, opts, track, src, layout);
     // Close the encoder's stdin so it can finish, even on error.
     drop(encoder.stdin.take());
     let enc_status = encoder.wait()?;
@@ -274,7 +290,7 @@ pub(crate) fn spawn_encoder(opts: &ExportOptions, out: Size) -> Result<Child> {
         .args(["-s", &format!("{}x{}", out.width, out.height)])
         .args(["-r", &opts.fps.to_string()])
         .args(["-i", "-"])
-        .args(opts.format.encode_args())
+        .args(opts.format.encode_args(opts.style.is_some()))
         .arg(&opts.output)
         .stdin(Stdio::piped())
         .spawn()
@@ -285,27 +301,41 @@ fn pump_frames(
     decoder: &mut Child,
     encoder: &mut Child,
     opts: &ExportOptions,
-    track: &CursorTrack,
+    track: Option<&CursorTrack>,
     src: Size,
-    out: Size,
+    layout: Layout,
 ) -> Result<()> {
     let mut reader = decoder.stdout.take().context("decoder stdout")?;
     let mut writer = BufWriter::new(encoder.stdin.take().context("encoder stdin")?);
-    let mut planner = opts.zoom.map(|z| ZoomPlanner::new(z, track, src));
-    let rings = opts.click_rings.then(|| ClickRings::new(track));
+    let mut planner = track
+        .zip(opts.zoom)
+        .map(|(t, z)| ZoomPlanner::new(z, t, src));
+    let rings = track.filter(|_| opts.click_rings).map(ClickRings::new);
+    let frame_style = opts.style.as_ref().map(|s| Frame::new(s, layout));
+    let mut canvas = frame_style.as_ref().map(Frame::blank);
 
+    let out = layout.content;
     let mut frame = vec![0u8; src.width as usize * src.height as usize * 4];
     let mut scaled = vec![0u8; out.width as usize * out.height as usize * 4];
+    let mut scratch = Vec::new();
     let mut index: u64 = 0;
     while read_frame(&mut reader, &mut frame)? {
         let t = index as f64 / opts.fps as f64;
         let view = planner.as_mut().map_or(Rect::full(src), |p| p.next(t));
-        crop_scale_rgba(&frame, src, view, &mut scaled, out, 0..out.height as usize);
+        let rows = 0..out.height as usize;
+        crop_scale_rgba_smooth(&frame, src, view, &mut scaled, out, rows, &mut scratch);
         if let Some(rings) = &rings {
             rings.draw(&mut scaled, out, view, t);
         }
+        let image = match (&frame_style, &mut canvas) {
+            (Some(f), Some(canvas)) => {
+                f.compose(&scaled, canvas, 0..out.height as usize);
+                &canvas[..]
+            }
+            _ => &scaled[..],
+        };
         writer
-            .write_all(&scaled)
+            .write_all(image)
             .context("writing to ffmpeg encoder")?;
         index += 1;
     }

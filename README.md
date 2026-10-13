@@ -9,6 +9,7 @@ bv record                 # record until Enter / Ctrl+C → ./bv-2026-10-11_15-4
 bv record demo.mp4 -z     # MP4, zooms in around each click
 bv record --zoom-on hover # zoom where the cursor rests (also click, follow)
 bv record --clicks        # draw a ring wherever you click
+bv record --style gradient # framed: background, rounded corners, shadow
 bv record -c              # copy the result to the clipboard
 bv record -s              # pick a screen or drag out an area first (Windows)
 bv record -d 10 --region 1280x720+0+0 --width 960
@@ -173,10 +174,32 @@ Tuning: `--zoom-level 2` (magnification), `--zoom-hold 1.5`,
 `--zoom-dwell 0.6` and `--zoom-smooth 0.8` (roughly how many seconds the
 camera takes to settle; larger is slower and smoother).
 
+### Styling
+
+`--style` frames the recording for a polished look: it sits on a background
+with padding around it, rounded corners and a soft drop shadow. The frame is
+added at export, so a `--keep-raw` take can be restyled with `bv export`, and
+zoom and click rings happen inside the frame (the frame itself stays still).
+
+| Style | Background |
+|---|---|
+| `none` (default) | no frame: the recording edge to edge, as before |
+| `clean` | light grey |
+| `gradient` | blue to violet |
+| `dark` | dark slate |
+
+`-w/--width` is the width of the whole frame, padding included; a small
+recording is never scaled up, the padding is added around it. Fine-tune with
+`--background '#rrggbb'` (or `'#rrggbb,#rrggbb'` for a diagonal gradient),
+`--padding PX` (default 8% of the recording's width) and `--radius PX`
+(default about 2%); any of them alone implies `--style clean`. The background
+never changes, so a styled GIF only stores it once and costs little more
+than an unstyled one.
+
 Useful flags: `-z/--zoom`, `--zoom-on click|hover|click-or-hover|follow`,
 `--zoom-level 2.5`, `--zoom-smooth 1.2`, `--zoom-hold 2`, `-w/--width 960`,
 `--fps 10`, `-d/--duration 15`, `-m/--monitor 2`, `--region WxH+X+Y`,
-`--trim-start 0.5`, `--trim-end 1`.
+`--trim-start 0.5`, `--trim-end 1`, `--style clean|gradient|dark`.
 
 **Size tips:** GitHub caps PR attachments at 10 MB. MP4 is usually 3–10×
 smaller than GIF for the same clip and GitHub plays it inline; use GIF where
@@ -214,12 +237,17 @@ and export time went.
    into a fast, visually lossless `.mkv`.
 2. **Export** — without zoom, a single ffmpeg pass scales and encodes (GIF uses
    a one-pass `palettegen`/`paletteuse` tuned for screen content). With zoom,
-   ffmpeg decodes to raw RGBA, frames are rendered as below, and a second
-   ffmpeg encodes.
+   click rings or a style, ffmpeg decodes to raw RGBA, frames are rendered as
+   below, and a second ffmpeg encodes.
 
 Either way a background thread samples the cursor at ~120 Hz into a JSON
 track, `ZoomPlanner` picks a viewport per frame (eased, frame-rate
 independent, clamped to the screen), and `render` crops + scales in one pass.
+With `--style`, the background and shadow are drawn once and each frame's
+changed rows are copied into the frame with anti-aliased corners, so
+everything outside the recording is byte-identical from frame to frame (the
+native GIF path adds a fixed ordered dither to the background so gradients
+don't band).
 
 ```
 crates/

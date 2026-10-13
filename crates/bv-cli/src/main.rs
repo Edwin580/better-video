@@ -22,8 +22,9 @@ use std::{
 
 use anyhow::{Context, Result};
 use bv_core::{
-    export, ffmpeg, monitor, zoom::ZoomTrigger, CaptureRegion, CursorTrack, Engine, ExportOptions,
-    Exported, MonitorChoice, OutputFormat, RecordOptions, Recording, ZoomConfig,
+    export, ffmpeg, monitor, zoom::ZoomTrigger, Background, CaptureRegion, CursorTrack, Engine,
+    ExportOptions, Exported, FrameStyle, MonitorChoice, OutputFormat, RecordOptions, Recording,
+    StylePreset, ZoomConfig,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -230,6 +231,34 @@ struct ExportArgs {
     /// Seconds to cut from the end (e.g. pressing the stop key).
     #[arg(long, default_value_t = 0.0, value_name = "SECS")]
     trim_end: f64,
+    /// Frame the recording: put it on a background with padding, rounded
+    /// corners and a soft shadow. --width is then the whole frame's width.
+    #[arg(long, value_enum, default_value_t = Style::None)]
+    style: Style,
+    /// Background colour behind the recording, #rrggbb, or two for a
+    /// gradient (#rrggbb,#rrggbb). Implies --style clean if no style is set.
+    #[arg(long, value_name = "COLOR[,COLOR]")]
+    background: Option<Background>,
+    /// Space around the recording in pixels [default: 8% of its width].
+    /// Implies --style clean if no style is set.
+    #[arg(long, value_name = "PX")]
+    padding: Option<u32>,
+    /// Corner radius of the recording in pixels [default: about 2% of its
+    /// width]. Implies --style clean if no style is set.
+    #[arg(long, value_name = "PX")]
+    radius: Option<u32>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Style {
+    /// The recording as is, edge to edge.
+    None,
+    /// Light grey background.
+    Clean,
+    /// Blue to violet gradient.
+    Gradient,
+    /// Dark slate background.
+    Dark,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -358,7 +387,32 @@ impl ExportArgs {
         opts.click_rings = self.clicks;
         opts.trim_start = self.trim_start;
         opts.trim_end = self.trim_end;
+        opts.style = self.style();
         opts
+    }
+
+    /// `--style` plus any finer --background / --padding / --radius.
+    fn style(&self) -> Option<FrameStyle> {
+        let preset = match self.style {
+            Style::Clean => StylePreset::Clean,
+            Style::Gradient => StylePreset::Gradient,
+            Style::Dark => StylePreset::Dark,
+            Style::None => {
+                let tweaked =
+                    self.background.is_some() || self.padding.is_some() || self.radius.is_some();
+                if !tweaked {
+                    return None;
+                }
+                StylePreset::Clean
+            }
+        };
+        let mut style = preset.style();
+        if let Some(bg) = self.background {
+            style.background = bg;
+        }
+        style.padding = self.padding.or(style.padding);
+        style.radius = self.radius.or(style.radius);
+        Some(style)
     }
 }
 
