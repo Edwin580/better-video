@@ -141,7 +141,7 @@ struct CaptureArgs {
     #[arg(long)]
     display: Option<String>,
     /// Stop automatically after this many seconds.
-    #[arg(long, short = 'd')]
+    #[arg(long, short = 'd', value_parser = positive_secs)]
     duration: Option<f64>,
     /// Capture frame rate [default: the export frame rate; 30 with ffmpeg
     /// and --keep-raw].
@@ -471,6 +471,15 @@ impl ExportArgs {
 
 /// Exit codes: 0 success, 1 error, 2 bad arguments (from clap), 3 the
 /// user cancelled the area picker or discarded the take.
+/// `--duration`: more than zero and a length `Duration` can hold (it panics
+/// on NaN, infinity and anything past a few hundred billion years).
+fn positive_secs(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if v > 0.0 && v <= 1e9 => Ok(v),
+        _ => Err("expected a number of seconds greater than 0".into()),
+    }
+}
+
 fn main() -> ExitCode {
     // Physical pixels everywhere, so monitor bounds, capture offsets and
     // cursor positions agree on scaled displays.
@@ -1234,6 +1243,17 @@ mod tests {
         assert_eq!(fps(&["--gif", "--keep-raw"], Engine::Ffmpeg), 30);
         assert_eq!(fps(&["--gif", "--keep-raw"], Engine::Native), 15);
         assert_eq!(fps(&["--gif", "--capture-fps", "24"], Engine::Ffmpeg), 24);
+    }
+
+    #[test]
+    fn duration_must_be_a_length_of_time() {
+        use clap::Parser;
+        let parse = |d: &str| Cli::try_parse_from(["bv", "record", "-d", d]);
+        assert!(parse("2.5").is_ok());
+        // Each of these used to reach `Duration::from_secs_f64` and panic.
+        for bad in ["nan", "inf", "1e30", "0", "soon"] {
+            assert!(parse(bad).is_err(), "-d {bad} should be refused");
+        }
     }
 
     #[cfg(not(windows))]
