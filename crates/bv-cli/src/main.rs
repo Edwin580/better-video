@@ -1,6 +1,7 @@
 mod clipboard;
 mod control;
 mod hotkey;
+mod library;
 #[cfg(feature = "tray")]
 mod settings;
 mod tracker;
@@ -59,6 +60,11 @@ enum Command {
     /// Stop recordings started by `bv record` in the background, wait for
     /// them to export, and print their results.
     Stop(StopArgs),
+    /// List saved recordings, newest first.
+    #[command(visible_alias = "ls")]
+    List(ListArgs),
+    /// Open the newest recording (or the recordings folder).
+    Open(OpenArgs),
     /// Install or print the Claude skill for recording demos with bv.
     Skill(SkillArgs),
     /// Check that dependencies are installed.
@@ -70,6 +76,29 @@ struct StopArgs {
     /// Give up waiting for the export after this many seconds.
     #[arg(long, default_value_t = 300, value_name = "SECS")]
     timeout: u64,
+}
+
+#[derive(Args)]
+struct ListArgs {
+    /// Folder to list [default: the recordings folder].
+    #[arg(long)]
+    dir: Option<PathBuf>,
+    /// Show at most this many (0 for all).
+    #[arg(long, short = 'n', default_value_t = 10)]
+    limit: usize,
+    /// Print a JSON array of {path, bytes, format, modified} on stdout.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct OpenArgs {
+    /// Folder to look in [default: the recordings folder].
+    #[arg(long)]
+    dir: Option<PathBuf>,
+    /// Open the folder instead of the newest recording in it.
+    #[arg(long)]
+    folder: bool,
 }
 
 #[derive(Args)]
@@ -92,8 +121,13 @@ enum SkillAction {
 
 #[derive(Args)]
 struct RecordArgs {
-    /// Output file. Defaults to ./bv-<timestamp>.<format>.
+    /// Output file, relative to --dir if given. Defaults to
+    /// bv-<timestamp>.<format> in the recordings folder.
     output: Option<PathBuf>,
+    /// Folder to save in [default: $BV_DIR, else ~/Videos/better-video
+    /// (~/Movies on macOS)].
+    #[arg(long)]
+    dir: Option<PathBuf>,
     #[command(flatten)]
     capture: CaptureArgs,
 }
@@ -103,8 +137,9 @@ struct HotkeyArgs {
     /// Key combination that starts and stops recording.
     #[arg(long, default_value = "ctrl+alt+r")]
     key: String,
-    /// Folder to save recordings in [default: current folder for `hotkey`,
-    /// ~/Videos/better-video (~/Movies on macOS) for `tray`].
+    /// Folder to save recordings in [default: $BV_DIR, else
+    /// ~/Videos/better-video (~/Movies on macOS); `tray` remembers a folder
+    /// picked from its menu].
     #[arg(long)]
     dir: Option<PathBuf>,
     /// Don't copy each recording to the clipboard.
@@ -181,6 +216,10 @@ struct ExportArgs {
     /// Shorthand for --format gif.
     #[arg(long, conflicts_with = "format")]
     gif: bool,
+    /// The polished look for a PR demo: --style gradient, --zoom-on click
+    /// and --clicks. A --style or zoom flag given as well wins.
+    #[arg(long, short = 'p')]
+    pretty: bool,
     /// Output width in pixels (height keeps aspect ratio).
     #[arg(long, short, default_value_t = 1280)]
     width: u32,
@@ -233,8 +272,9 @@ struct ExportArgs {
     trim_end: f64,
     /// Frame the recording: put it on a background with padding, rounded
     /// corners and a soft shadow. --width is then the whole frame's width.
-    #[arg(long, value_enum, default_value_t = Style::None)]
-    style: Style,
+    /// [default: none; gradient with --pretty]
+    #[arg(long, value_enum)]
+    style: Option<Style>,
     /// Background colour behind the recording, #rrggbb, or two for a
     /// gradient (#rrggbb,#rrggbb). Implies --style clean if no style is set.
     #[arg(long, value_name = "COLOR[,COLOR]")]
@@ -359,12 +399,26 @@ impl ExportArgs {
             .unwrap_or(OutputFormat::Gif)
     }
 
-    /// `--zoom-on`, else `--zoom-follow`, else `-z` (click).
+    /// `--zoom-on`, else `--zoom-follow`, else `-z` or `--pretty` (click).
     fn trigger(&self) -> Option<ZoomTrigger> {
         self.zoom_on
             .map(Into::into)
             .or(self.zoom_follow.then_some(ZoomTrigger::Follow))
-            .or(self.zoom.then_some(ZoomTrigger::Click))
+            .or((self.zoom || self.pretty).then_some(ZoomTrigger::Click))
+    }
+
+    /// `--clicks`, or `--pretty`.
+    fn clicks(&self) -> bool {
+        self.clicks || self.pretty
+    }
+
+    /// `--style`, else gradient for `--pretty`.
+    fn style_preset(&self) -> Style {
+        self.style.unwrap_or(if self.pretty {
+            Style::Gradient
+        } else {
+            Style::None
+        })
     }
 
     fn zoom(&self) -> Option<ZoomConfig> {
@@ -382,7 +436,7 @@ impl ExportArgs {
         ui::Choices {
             format,
             quality: ui::Quality::from_width(self.width),
-            clicks: self.clicks,
+            clicks: self.clicks(),
             zoom: ui::ZoomMode::from_trigger(self.trigger()),
         }
     }
@@ -394,6 +448,9 @@ impl ExportArgs {
         self.width = c.quality.width();
         self.fps = Some(c.quality.fps());
         self.clicks = c.clicks;
+        // The bar picked clicks and zoom; --pretty's style still holds.
+        self.style = Some(self.style_preset());
+        self.pretty = false;
         self.zoom = false;
         self.zoom_follow = false;
         self.zoom_on = c.zoom.trigger().map(|t| match t {
@@ -409,7 +466,7 @@ impl ExportArgs {
     }
 
     fn needs_cursor(&self) -> bool {
-        self.zoom().is_some() || self.clicks
+        self.zoom().is_some() || self.clicks()
     }
 
     /// `--cursor`, or `none` for `--no-cursor`; `None` picks a default.
@@ -437,7 +494,7 @@ impl ExportArgs {
             opts.fps = fps;
         }
         opts.zoom = self.zoom();
-        opts.click_rings = self.clicks;
+        opts.click_rings = self.clicks();
         opts.trim_start = self.trim_start;
         opts.trim_end = self.trim_end;
         opts.style = self.style();
@@ -446,7 +503,7 @@ impl ExportArgs {
 
     /// `--style` plus any finer --background / --padding / --radius.
     fn style(&self) -> Option<FrameStyle> {
-        let preset = match self.style {
+        let preset = match self.style_preset() {
             Style::Clean => StylePreset::Clean,
             Style::Gradient => StylePreset::Gradient,
             Style::Dark => StylePreset::Dark,
@@ -493,6 +550,8 @@ fn main() -> ExitCode {
         Command::Monitors => list_monitors(),
         Command::Windows => list_windows(),
         Command::Stop(args) => stop(args),
+        Command::List(args) => list(args),
+        Command::Open(args) => open(args),
         Command::Skill(args) => skill(args),
         Command::Doctor => doctor(),
     };
@@ -528,6 +587,49 @@ fn stop(args: StopArgs) -> Result<()> {
     for r in results {
         println!("{r}");
     }
+    Ok(())
+}
+
+fn list(args: ListArgs) -> Result<()> {
+    let dir = args.dir.unwrap_or_else(library::dir);
+    let mut clips = library::clips(&dir);
+    if args.limit > 0 {
+        clips.truncate(args.limit);
+    }
+    if args.json {
+        let all: Vec<_> = clips.iter().map(library::Clip::json).collect();
+        println!("{}", serde_json::Value::Array(all));
+        return Ok(());
+    }
+    if clips.is_empty() {
+        eprintln!("No recordings in {} yet.", absolute(&dir).display());
+    }
+    for c in clips {
+        println!(
+            "{:>11}  {:>8}  {}",
+            library::age(c.modified),
+            human_size(c.bytes),
+            absolute(&c.path).display()
+        );
+    }
+    Ok(())
+}
+
+fn open(args: OpenArgs) -> Result<()> {
+    let dir = args.dir.unwrap_or_else(library::dir);
+    let target = if args.folder {
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        dir
+    } else {
+        library::clips(&dir)
+            .into_iter()
+            .next()
+            .with_context(|| format!("no recordings in {} yet", absolute(&dir).display()))?
+            .path
+    };
+    let target = absolute(&target);
+    library::open_path(&target).with_context(|| format!("opening {}", target.display()))?;
+    eprintln!("Opened {}", target.display());
     Ok(())
 }
 
@@ -613,17 +715,19 @@ fn list_monitors() -> Result<()> {
 
 fn record(args: RecordArgs) -> Result<()> {
     let format = args.capture.export.format(args.output.as_deref());
-    let output = args
-        .output
-        .clone()
-        .unwrap_or_else(|| fresh_output(Path::new(""), format));
+    let output = record_output(&args, format)?;
     let stop = stop_signal(true)?;
     // A cancelled picker returns Cancelled, which exits with code 3.
     let mut session = Session::start(&args.capture, output.clone(), format)?;
     // So `bv stop` (from a script or agent) can end it.
     let active = control::Active::register(&output)?;
-    eprintln!("● Recording… press Enter or Ctrl+C to stop (or run `bv stop`)");
-    while !stop.load(Ordering::Relaxed) && !session.finished() && !active.stop_requested() {
+    eprintln!("● Recording to {}", absolute(&session.output).display());
+    if stop.enter {
+        eprintln!("  press Enter or Ctrl+C to stop (or run `bv stop`)");
+    } else {
+        eprintln!("  run `bv stop` or press Ctrl+C to stop");
+    }
+    while !stop.requested() && !session.finished() && !active.stop_requested() {
         thread::sleep(Duration::from_millis(50));
     }
     // Discarding from the recording pill also returns Cancelled.
@@ -632,28 +736,52 @@ fn record(args: RecordArgs) -> Result<()> {
     Ok(())
 }
 
+/// The file `bv record` saves to: OUT (inside --dir if given), else a
+/// fresh time-stamped name in --dir or the recordings folder. Its folder
+/// is created if needed.
+fn record_output(args: &RecordArgs, format: OutputFormat) -> Result<PathBuf> {
+    let output = match (&args.output, &args.dir) {
+        (Some(out), Some(dir)) => dir.join(out),
+        (Some(out), None) => out.clone(),
+        (None, dir) => {
+            let dir = dir.clone().unwrap_or_else(library::dir);
+            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+            library::fresh_output(&dir, format)
+        }
+    };
+    if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    Ok(output)
+}
+
 fn hotkey_mode(mut args: HotkeyArgs) -> Result<()> {
     let key: Hotkey = args.key.parse().map_err(anyhow::Error::msg)?;
     let mut keys = hotkey::keyboard().context(
         "keyboard access unavailable (needs X11 on Linux; Input Monitoring permission on macOS)",
     )?;
-    let dir = args.dir.clone().unwrap_or_else(|| PathBuf::from("."));
-    std::fs::create_dir_all(&dir)?;
+    let dir = args.dir.clone().unwrap_or_else(library::dir);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     args.capture.export.copy |= !args.no_copy;
     let format = args.capture.export.format(None);
     let quit = stop_signal(false)?;
     let mut edge = EdgeDetector::default();
     let mut session: Option<Session> = None;
 
-    eprintln!("Press {} to start/stop recording, Ctrl+C to quit", args.key);
+    eprintln!(
+        "Press {} to start/stop recording, Ctrl+C to quit. Saving to {}",
+        args.key,
+        absolute(&dir).display()
+    );
     loop {
         let pressed = edge.pressed(key.held(&keys()));
-        let quitting = quit.load(Ordering::Relaxed);
+        let quitting = quit.requested();
         let ended = session.as_mut().is_some_and(Session::finished);
         match &session {
             None if quitting => return Ok(()),
             None if pressed => {
-                let output = fresh_output(&dir, format);
+                let output = library::fresh_output(&dir, format);
                 match Session::start(&args.capture, output, format) {
                     Ok(s) => {
                         eprintln!("● Recording… press {} to stop", args.key);
@@ -975,25 +1103,43 @@ fn doctor() -> Result<()> {
         None => println!("✗ cursor tracking unavailable (no zoom/clicks; system pointer)"),
     }
     println!("  platform: {:?}", ffmpeg::Platform::current());
+    println!(
+        "  recordings: {} (set {} to change)",
+        absolute(&library::dir()).display(),
+        library::DIR_VAR
+    );
     println!("  network: none (bv never connects anywhere; everything stays on this machine)");
     Ok(())
 }
 
-/// Flag set by Ctrl+C, or by pressing Enter (when `enter` and attached to
-/// a terminal).
-fn stop_signal(enter: bool) -> Result<Arc<AtomicBool>> {
-    let stop = Arc::new(AtomicBool::new(false));
-    let s = stop.clone();
-    ctrlc::set_handler(move || s.store(true, Ordering::Relaxed))
+/// Set by Ctrl+C, or by pressing Enter (when asked for and attached to a
+/// terminal we own).
+pub(crate) struct StopSignal {
+    flag: Arc<AtomicBool>,
+    /// Whether pressing Enter stops.
+    enter: bool,
+}
+
+impl StopSignal {
+    fn requested(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+}
+
+fn stop_signal(enter: bool) -> Result<StopSignal> {
+    let flag = Arc::new(AtomicBool::new(false));
+    let f = flag.clone();
+    ctrlc::set_handler(move || f.store(true, Ordering::Relaxed))
         .context("installing Ctrl+C handler")?;
-    if enter && io::stdin().is_terminal() && in_foreground() {
-        let s = stop.clone();
+    let enter = enter && io::stdin().is_terminal() && in_foreground();
+    if enter {
+        let f = flag.clone();
         thread::spawn(move || {
             let _ = io::stdin().lock().lines().next();
-            s.store(true, Ordering::Relaxed);
+            f.store(true, Ordering::Relaxed);
         });
     }
-    Ok(stop)
+    Ok(StopSignal { flag, enter })
 }
 
 /// Whether we own the terminal. Reading it from the background (`bv record
@@ -1007,78 +1153,6 @@ fn in_foreground() -> bool {
 #[cfg(not(unix))]
 fn in_foreground() -> bool {
     true
-}
-
-/// A new file in `dir` named after the current time, with `-2`, `-3`, …
-/// added if a recording from the same second already exists.
-fn fresh_output(dir: &Path, format: OutputFormat) -> PathBuf {
-    let first = dir.join(default_output(format));
-    let stem = first.with_extension("");
-    let numbered = |n: u32| {
-        let mut name = stem.clone().into_os_string();
-        name.push(format!("-{n}.{}", format.extension()));
-        PathBuf::from(name)
-    };
-    std::iter::once(first.clone())
-        .chain((2..).map(numbered))
-        .find(|p| !p.exists())
-        .unwrap_or(first)
-}
-
-/// `bv-2026-10-11_15-48-12.gif`: local time on Windows, UTC elsewhere.
-fn default_output(format: OutputFormat) -> PathBuf {
-    let (y, mo, d, h, mi, s) = now();
-    PathBuf::from(format!(
-        "bv-{y:04}-{mo:02}-{d:02}_{h:02}-{mi:02}-{s:02}.{}",
-        format.extension()
-    ))
-}
-
-#[cfg(windows)]
-fn now() -> (u32, u32, u32, u32, u32, u32) {
-    let mut t = unsafe { std::mem::zeroed() };
-    unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut t) };
-    let t: windows_sys::Win32::Foundation::SYSTEMTIME = t;
-    let f = |v: u16| v as u32;
-    (
-        f(t.wYear),
-        f(t.wMonth),
-        f(t.wDay),
-        f(t.wHour),
-        f(t.wMinute),
-        f(t.wSecond),
-    )
-}
-
-#[cfg(not(windows))]
-fn now() -> (u32, u32, u32, u32, u32, u32) {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let (days, rem) = (secs / 86_400, secs % 86_400);
-    let (y, m, d) = civil_from_days(days as i64);
-    (
-        y as u32,
-        m,
-        d,
-        (rem / 3600) as u32,
-        (rem / 60 % 60) as u32,
-        (rem % 60) as u32,
-    )
-}
-
-/// Days since 1970-01-01 to (year, month, day), proleptic Gregorian.
-#[cfg(not(windows))]
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (yoe + era * 400 + (m <= 2) as i64, m, d)
 }
 
 /// "412 KB", "3.4 MB".
@@ -1144,29 +1218,6 @@ mod tests {
         assert_eq!(human_size(1000), "1 KB");
         assert_eq!(human_size(421_000), "412 KB");
         assert_eq!(human_size(3_565_158), "3.4 MB");
-    }
-
-    #[test]
-    fn fresh_output_never_overwrites() {
-        let dir = std::env::temp_dir().join(format!("bv-fresh-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let a = fresh_output(&dir, OutputFormat::Gif);
-        std::fs::write(&a, b"x").unwrap();
-        let b = fresh_output(&dir, OutputFormat::Gif);
-        assert_ne!(a, b);
-        assert!(!b.exists());
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn output_names_sort_by_time() {
-        let name = default_output(OutputFormat::Gif);
-        let name = name.to_string_lossy();
-        assert!(
-            name.starts_with("bv-20") && name.ends_with(".gif"),
-            "{name}"
-        );
-        assert_eq!(name.len(), "bv-2026-10-11_15-48-12.gif".len());
     }
 
     /// Every `--flag` the skill and the README mention must exist, so the
@@ -1256,10 +1307,58 @@ mod tests {
         }
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn civil_dates() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(20_737), (2026, 10, 11));
+    fn pretty_is_the_pr_look_and_yields_to_explicit_flags() {
+        use clap::Parser;
+        let export = |args: &[&str]| {
+            let cli = Cli::try_parse_from([&["bv", "record"], args].concat()).unwrap();
+            let Command::Record(r) = cli.command else {
+                panic!("not a record command");
+            };
+            r.capture.export
+        };
+        let plain = export(&[]);
+        assert!(plain.style().is_none() && plain.trigger().is_none() && !plain.clicks());
+        let pretty = export(&["-p"]);
+        assert_eq!(
+            pretty.style().map(|s| s.background),
+            Some(StylePreset::Gradient.style().background)
+        );
+        assert_eq!(pretty.trigger(), Some(ZoomTrigger::Click));
+        assert!(pretty.clicks());
+        let tuned = export(&["--pretty", "--style", "none", "--zoom-on", "hover"]);
+        assert!(tuned.style().is_none());
+        assert_eq!(tuned.trigger(), Some(ZoomTrigger::Hover));
+        // Turning zoom off in the --select bar sticks; the style stays.
+        let mut picked = export(&["--pretty"]);
+        let mut choices = picked.choices(OutputFormat::Mp4);
+        choices.zoom = ui::ZoomMode::Off;
+        choices.clicks = false;
+        picked.apply(&choices);
+        assert_eq!(picked.trigger(), None);
+        assert!(!picked.clicks());
+        assert!(picked.style().is_some());
+    }
+
+    #[test]
+    fn record_saves_in_the_recordings_folder_unless_told_otherwise() {
+        use clap::Parser;
+        let dir = std::env::temp_dir().join(format!("bv-record-out-{}", std::process::id()));
+        let out = |args: &[&str]| {
+            let cli = Cli::try_parse_from([&["bv", "record"], args].concat()).unwrap();
+            let Command::Record(r) = cli.command else {
+                panic!("not a record command");
+            };
+            let format = r.capture.export.format(r.output.as_deref());
+            record_output(&r, format).unwrap()
+        };
+        let d = dir.to_str().unwrap();
+        assert_eq!(out(&["demo.mp4"]), PathBuf::from("demo.mp4"));
+        assert_eq!(out(&["demo.mp4", "--dir", d]), dir.join("demo.mp4"));
+        let fresh = out(&["--dir", d, "--format", "mp4"]);
+        assert_eq!(fresh.parent(), Some(dir.as_path()));
+        assert!(fresh.to_string_lossy().ends_with(".mp4"));
+        assert!(dir.is_dir(), "the folder is created");
+        std::fs::remove_dir_all(dir).ok();
     }
 }
