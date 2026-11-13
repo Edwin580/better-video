@@ -5,7 +5,8 @@ MP4 you can drop straight into a PR body**, optionally with a camera that
 **zooms in on your cursor** so reviewers can actually see what you clicked.
 
 ```sh
-bv record                 # record until Enter / Ctrl+C → ./bv-2026-10-11_15-48-12.gif
+bv record                 # record until Enter / Ctrl+C → ~/Videos/better-video/bv-2026-10-11_15-48-12.gif
+bv record demo.mp4 -p     # MP4, the PR look: framed, zooms on clicks, click rings
 bv record demo.mp4 -z     # MP4, zooms in around each click
 bv record --zoom-on hover # zoom where the cursor rests (also click, follow)
 bv record --clicks        # draw a ring wherever you click
@@ -14,8 +15,9 @@ bv record --cursor-size 2  # bigger pointer (drawn at export, smoothed)
 bv record -c              # copy the result to the clipboard
 bv record -s              # pick a screen or drag out an area first (Windows)
 bv record -d 10 --region 1280x720+0+0 --width 960
-bv hotkey --dir ~/Videos  # Ctrl+Alt+R starts/stops; each clip is copied
+bv hotkey                 # Ctrl+Alt+R starts/stops; each clip is copied
 bv tray                   # same, from a menu bar / tray icon
+bv list                   # your recordings, newest first (bv open plays the last one)
 ```
 
 ## Quick start (Windows)
@@ -72,15 +74,21 @@ bv doctor                 # what's available on this machine
 `bv` is built to be driven by tools as well as people:
 
 ```sh
-bv record demo.mp4 --region 1000x600+100+80 --style gradient --zoom-on click --clicks --json &
+bv record /tmp/bv/demo.mp4 --region 1000x600+100+80 -p --json &
 # ...drive the app (real pointer events: xdotool, cliclick, SendInput)...
 bv stop                    # stops it, waits for the export, prints the JSON result
-bv record demo.mp4 --window "My App" -d 15 --json   # or a fixed length (Windows: by title)
+bv record /tmp/bv/demo.mp4 --window "My App" -d 15 --json   # or a fixed length (Windows: by title)
+bv list -n 1 --json        # find the last recording again
 ```
 
 - **One JSON line.** With `--json`, stdout is exactly one line:
   `{"path", "bytes", "format", "width", "height", "seconds"}`. Progress and
   notes always go to stderr.
+- **One flag for the look.** `-p/--pretty` is `--style gradient --zoom-on
+  click --clicks`; any of those given as well wins.
+- **Keep videos out of the repo.** Give a path outside it (missing folders
+  are created), or none: bv then saves to the recordings folder and the
+  JSON says where.
 - **Exit codes.** 0 saved, 1 error, 2 bad arguments, 3 cancelled or
   discarded by a person.
 - **Real pointer only.** bv samples the OS pointer for the drawn cursor,
@@ -107,8 +115,8 @@ better-video is local-only:
   and button state are sampled while recording, only to draw the pointer,
   click rings and zoom (not with `--cursor os` or `--no-cursor` unless
   zoom or click rings are on).
-- **Where files go:** the output file you name, or `Videos\better-video`
-  for the tray. While recording, a raw intermediate is kept in
+- **Where files go:** the output file you name, or the recordings folder
+  (`Videos\better-video`, see [Where recordings go](#where-recordings-go)). While recording, a raw intermediate is kept in
   `%TEMP%\better-video` and deleted after export; leftovers from a crash
   are removed after a day. Tray settings live in
   `%APPDATA%\better-video\settings.json`.
@@ -124,14 +132,34 @@ better-video is local-only:
 | Command | What it does |
 | --- | --- |
 | `bv record [OUT]` | Record the screen, export when you stop. Format comes from `--format`, `--gif`, or the file extension (default GIF). |
-| `bv hotkey` | Run in the background. `--key` (default `ctrl+alt+r`) starts and stops a recording; each one is exported to `--dir` and copied to the clipboard. Takes the same capture/export flags as `record`. macOS needs Input Monitoring permission. |
-| `bv tray` | Tray (Windows, Linux) / menu bar (macOS) icon. On Windows, click it (or press the hotkey) to pick an area and options, then record; right-click for the menu: record the same area again, open or show the last clip, the save folder (shown in the menu, changeable), clipboard copy. Elsewhere the menu starts/stops recording the primary screen. Saves to `~/Videos/better-video` (`~/Movies` on macOS) unless `--dir` is set; a notification shows each saved file. Build with `--features tray`. |
+| `bv hotkey` | Run in the background. `--key` (default `ctrl+alt+r`) starts and stops a recording; each one is exported to the recordings folder (or `--dir`) and copied to the clipboard. Takes the same capture/export flags as `record`. macOS needs Input Monitoring permission. |
+| `bv tray` | Tray (Windows, Linux) / menu bar (macOS) icon. On Windows, click it (or press the hotkey) to pick an area and options, then record; right-click for the menu: record the same area again, open or show the last clip, the save folder (shown in the menu, changeable), clipboard copy. Elsewhere the menu starts/stops recording the primary screen. Saves to the recordings folder unless `--dir` is set (or another folder is picked from the menu); a notification shows each saved file. Build with `--features tray`. |
 | `bv export RAW` | Re-export a raw recording (`bv record --keep-raw`) with different settings, e.g. try zoom on/off without re-recording. |
 | `bv monitors` | List connected monitors (Windows) with the number to pass to `--monitor`. |
 | `bv windows` | List visible windows (Windows), for `--window "Title"`. |
 | `bv stop` | Stop recordings running in the background, wait for their export, and print the results. |
+| `bv list` (`ls`) | List recordings in the recordings folder (or `--dir`), newest first, with age and size. `-n 0` shows all; `--json` prints `[{"path", "bytes", "format", "modified"}]`. |
+| `bv open` | Open the newest recording; `--folder` opens the recordings folder. |
 | `bv skill install` | Install the Claude skill for recording demos (`~/.claude/skills/better-video/SKILL.md`). `bv skill show` prints it. |
 | `bv doctor` | Check dependencies. |
+
+### Where recordings go
+
+Every mode saves to one folder, so clips don't pile up wherever you
+happened to be (or end up committed to a repo):
+
+| | Folder |
+|---|---|
+| default | `~/Videos/better-video` (`Videos\better-video` on Windows, `~/Movies/better-video` on macOS) |
+| `BV_DIR=/path` | that folder, for every command (set it once in your shell profile) |
+| `--dir PATH` | that folder, for this run (`record`, `hotkey`, `tray`, `list`, `open`) |
+| `bv record OUT` | exactly `OUT` (relative to `--dir` if given, else the current folder) |
+
+Files are named after the local time they were recorded,
+`bv-2026-10-11_15-48-12.mp4`, so they sort by date; a second take in the
+same second gets `-2`. A `--keep-raw` take keeps its raw recording and
+cursor track next to the clip (`demo.raw.mkv`, `demo.raw.cursor.json`);
+`bv list` shows only the finished GIF/MP4/WebM files.
 
 **Choosing what to record:** `-s/--select` dims every screen before recording:
 click a screen to record all of it, or drag out an area (Esc cancels), then
@@ -245,7 +273,7 @@ pointer can be re-exported with any `--cursor-*` settings, or with
 `--no-cursor`; `bv export` draws it again by default. `bv export --track
 PATH` names the cursor track if it isn't next to the recording.
 
-Useful flags: `-z/--zoom`, `--zoom-on click|hover|click-or-hover|follow`,
+Useful flags: `-p/--pretty`, `-z/--zoom`, `--zoom-on click|hover|click-or-hover|follow`,
 `--zoom-level 1.25`, `--zoom-smooth 1.2`, `--zoom-hold 2`, `-w/--width 960`,
 `--fps 10`, `-d/--duration 15`, `-m/--monitor 2`, `--region WxH+X+Y`,
 `--trim-start 0.5`, `--trim-end 1`, `--style clean|gradient|dark`,

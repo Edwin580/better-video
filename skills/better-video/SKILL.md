@@ -50,28 +50,32 @@ Then set the stage:
   notifications) anywhere in the area. Close other windows that could pop
   over it.
 - **Probe the area** with a 1 s take and look at it (section 5) before the
-  real one: `bv record probe.mp4 --region 560x420+680+110 -d 1`.
+  real one: `bv record /tmp/bv/probe.mp4 --region 560x420+680+110 -d 1`.
 
 ## 3. Record
 
 Recommended for a PR:
 
 ```sh
-bv record demo.mp4 --region 560x420+680+110 \
-  --style gradient --zoom-on click --clicks \
-  --trim-start 0.5 --trim-end 0.5 --keep-raw --json > demo.json &
+mkdir -p /tmp/bv
+bv record /tmp/bv/demo.mp4 --region 560x420+680+110 -p \
+  --trim-start 0.5 --trim-end 0.5 --keep-raw --json > /tmp/bv/demo.json &
 # ... drive the app: the storyboard beats (section 4) ...
 bv stop          # stops it, waits for the export, prints the JSON result
 ```
 
+- **Save outside the repo** (here `/tmp/bv`) so the video is never
+  committed. With no path at all, bv saves to its recordings folder
+  (`~/Videos/better-video`, or `$BV_DIR`); the JSON `path` says where, and
+  `bv list -n 1 --json` finds the last one again.
 - **MP4** (`.mp4` path): small and plays inline on GitHub. Export a GIF
   as well only where a GIF is needed (an inline preview in Markdown).
-- **`--style gradient`** (or `clean`, `dark`): background, padding, rounded
-  corners, shadow. `-w` is then the whole frame's width.
-- **`--zoom-on click`** zooms on each click (`hover` for where the pointer
-  rests); **`--clicks`** draws a ring at each click. The pointer is drawn
-  at export by default (`--cursor drawn`); `--cursor-size 2` makes it
-  bigger.
+- **`-p/--pretty`** is the PR look in one flag: `--style gradient` (background,
+  padding, rounded corners, shadow; `-w` is then the whole frame's width),
+  `--zoom-on click` (zoom on each click) and `--clicks` (a ring at each
+  click). Override any part: `--style dark`, `--zoom-on hover`. The pointer
+  is drawn at export by default (`--cursor drawn`); `--cursor-size 2`
+  makes it bigger.
 - **Zoom picks its own depth** (1.25x to 1.8x) to frame the clicks it
   covers, opens and ends on the whole screen, and skips clicks it can't
   show well (spread out, too early or too late). Leave `--zoom-level`
@@ -95,8 +99,8 @@ bv stop          # stops it, waits for the export, prints the JSON result
 zoom, trim or pointer settings:
 
 ```sh
-bv export demo.raw.mkv -o demo.mp4 --style dark --zoom-on click --clicks --zoom-level 1.25  # gentler zoom
-bv export demo.raw.mkv -o demo.gif -w 800 --fps 12 --style gradient --zoom-on click --clicks
+bv export /tmp/bv/demo.raw.mkv -o /tmp/bv/demo.mp4 -p --style dark --zoom-level 1.25  # gentler zoom
+bv export /tmp/bv/demo.raw.mkv -o /tmp/bv/demo.gif -w 800 --fps 12 -p
 ```
 
 ## 4. Drive the app
@@ -148,6 +152,7 @@ export DISPLAY=:99   # for bv, xdotool and the driving script
 Look at the frames, don't assume:
 
 ```sh
+cd /tmp/bv
 DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 demo.mp4)
 ffmpeg -v error -y -i demo.mp4 -vf "fps=6/$DUR,scale=640:-1,tile=3x2" -frames:v 1 check.png
 ffmpeg -v error -y -ss 4.5 -i demo.mp4 -frames:v 1 at-4.5s.png   # one moment, full size
@@ -180,8 +185,8 @@ GitHub shows a player:
 ```
 
 ```sh
-gh pr comment 123 --body-file pr-video.md --attach demo.mp4
-gh pr create --title "..." --body-file pr-body.md --attach demo.mp4   # new PR
+gh pr comment 123 --body-file pr-video.md --attach /tmp/bv/demo.mp4
+gh pr create --title "..." --body-file pr-body.md --attach /tmp/bv/demo.mp4   # new PR
 ```
 
 **Older `gh`, or no `gh`:**
@@ -192,7 +197,7 @@ gh pr create --title "..." --body-file pr-body.md --attach demo.mp4   # new PR
   ```sh
   git fetch origin pr-assets; git worktree add --detach ../assets && cd ../assets
   git switch pr-assets 2>/dev/null || git switch --orphan pr-assets   # new: ask first
-  cp ../repo/demo.mp4 pr123-demo.mp4 && cp ../repo/demo.gif pr123-demo.gif
+  cp /tmp/bv/demo.mp4 pr123-demo.mp4 && cp /tmp/bv/demo.gif pr123-demo.gif
   git add pr123-* && git commit -m "Add demo for #123" && git push origin pr-assets
   ```
 
@@ -216,4 +221,5 @@ Report the PR or comment URL.
 | `bv stop` takes minutes | Long takes export slowly; keep it under 30 s. `bv stop --timeout 120` bounds the wait. |
 | File too big | MP4 instead of GIF; shorter take, tighter `--trim-start/--trim-end`; `-w 960`; GIF: `--fps 10`. |
 | Text unreadable | Record a smaller area or zoom in (`--zoom-level 2.5`); don't shrink below `-w 800`. |
+| Lost the file | `bv list --json` (recordings folder), or the `path` in the JSON result. |
 | Exit code 2 | A flag is wrong: `bv record --help`, `bv export --help`. |

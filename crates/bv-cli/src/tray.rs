@@ -8,7 +8,6 @@
 
 use std::{
     path::{Path, PathBuf},
-    process::Command,
     sync::atomic::Ordering,
     thread,
     time::Instant,
@@ -26,9 +25,9 @@ use tray_icon::{
 };
 
 use crate::{
-    fresh_output,
     hotkey::{self, EdgeDetector, Hotkey},
     human_size,
+    library::{self, fresh_output, open_path},
     settings::Settings,
     stop_signal,
     ui::{self, Choices, Quality},
@@ -163,14 +162,14 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
         .dir
         .clone()
         .or_else(|| settings.dir.clone())
-        .unwrap_or_else(default_dir);
+        .unwrap_or_else(library::dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let base = args.capture.clone();
     // Small GIFs unless told otherwise: that's what this is for.
     let mut choices = settings.choices.unwrap_or(Choices {
         format: OutputFormat::Gif,
         quality: Quality::Small,
-        clicks: base.export.clicks,
+        clicks: base.export.clicks(),
         zoom: ui::ZoomMode::from_trigger(base.export.trigger()),
     });
     let copy = !args.no_copy && settings.copy.unwrap_or(true);
@@ -254,12 +253,14 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
                 } else if id == items.again.id() {
                     again = true;
                 } else if id == items.quit.id() {
-                    quit.store(true, Ordering::Relaxed);
+                    quit.flag.store(true, Ordering::Relaxed);
                 } else if id == items.open_dir.id() {
                     ui::reveal(&dir);
                 } else if id == items.last.id() {
                     if let Some(p) = &last {
-                        open_path(p);
+                        if let Err(e) = open_path(p) {
+                            eprintln!("error: couldn't open {}: {e}", p.display());
+                        }
                     }
                 } else if id == items.reveal.id() {
                     if let Some(p) = &last {
@@ -356,7 +357,7 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
         if let State::Recording(s) = &mut state {
             toggle |= s.finished();
         }
-        let quitting = quit.load(Ordering::Relaxed);
+        let quitting = quit.requested();
 
         if toggle || again || quitting {
             state = match std::mem::replace(&mut state, State::Exporting) {
@@ -410,34 +411,6 @@ pub fn run(args: HotkeyArgs) -> Result<()> {
             *control_flow = ControlFlow::Exit;
         }
     })
-}
-
-/// `~/Movies/better-video` on macOS, `~/Videos/better-video` elsewhere.
-fn default_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let videos = if cfg!(target_os = "macos") {
-        "Movies"
-    } else {
-        "Videos"
-    };
-    home.join(videos).join("better-video")
-}
-
-/// Open a file with its default app.
-fn open_path(path: &Path) {
-    let program = if cfg!(target_os = "macos") {
-        "open"
-    } else if cfg!(target_os = "windows") {
-        "explorer"
-    } else {
-        "xdg-open"
-    };
-    if let Err(e) = Command::new(program).arg(path).spawn() {
-        eprintln!("error: couldn't run {program}: {e}");
-    }
 }
 
 fn set_icon(tray: &TrayIcon, recording: bool) {
