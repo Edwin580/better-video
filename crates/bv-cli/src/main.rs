@@ -2,6 +2,7 @@ mod clipboard;
 mod control;
 mod hotkey;
 mod library;
+mod screen;
 #[cfg(feature = "tray")]
 mod settings;
 mod tracker;
@@ -526,8 +527,22 @@ impl ExportArgs {
     }
 }
 
-/// Exit codes: 0 success, 1 error, 2 bad arguments (from clap), 3 the
-/// user cancelled the area picker or discarded the take.
+/// Exit codes: 0 success, 1 error, 2 bad arguments (from clap, or a
+/// [`BadArgument`] found later), 3 the user cancelled the area picker or
+/// discarded the take.
+/// An argument clap accepted but that can't work here, e.g. a `--region`
+/// past the edge of the screen. Exits with code 2, like clap's own errors.
+#[derive(Debug)]
+struct BadArgument(String);
+
+impl std::fmt::Display for BadArgument {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for BadArgument {}
+
 /// `--duration`: more than zero and a length `Duration` can hold (it panics
 /// on NaN, infinity and anything past a few hundred billion years).
 fn positive_secs(s: &str) -> Result<f64, String> {
@@ -560,6 +575,10 @@ fn main() -> ExitCode {
         Err(e) if e.is::<ui::Cancelled>() => {
             eprintln!("Cancelled.");
             ExitCode::from(3)
+        }
+        Err(e) if e.is::<BadArgument>() => {
+            eprintln!("error: {e:#}");
+            ExitCode::from(2)
         }
         Err(e) => {
             eprintln!("error: {e:#}");
@@ -853,6 +872,16 @@ impl Session {
             Some(p) => Some(p.region),
             None => args.capture_region()?,
         };
+        let engine = args.engine();
+        // x11grab can only grab what's on the screen, and otherwise fails
+        // with a bare "Invalid argument".
+        if let (Engine::Ffmpeg, Some(r)) = (engine, region) {
+            let why = screen::bounds(args.display.as_deref())
+                .and_then(|screen| screen::off_screen(r, screen));
+            if let Some(why) = why {
+                return Err(BadArgument(why).into());
+            }
+        }
 
         // Drawing the pointer at export needs to know where it was.
         let tracking = CursorTracker::available();
@@ -866,7 +895,6 @@ impl Session {
             None => CursorMode::Os,
         };
 
-        let engine = args.engine();
         let raw_ext = format!("raw.{}", engine.raw_extension());
         let raw = if args.keep_raw {
             output.with_extension(&raw_ext)
